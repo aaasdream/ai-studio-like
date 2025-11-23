@@ -1,3 +1,4 @@
+https://aaasdream.github.io/ai-studio-like/dist/index.html
 # Gemini Studio Clone
 
 A powerful, web-based client for Google's Gemini models, designed to replicate and enhance the AI Studio experience. Built with React, Vite, and the official Google GenAI SDK.
