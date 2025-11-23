@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Studio Clone",
+  "description": "A comprehensive replica of Google AI Studio featuring multi-turn chat, system instructions, model parameter tuning, multimodal inputs, and code generation export.",
+  "requestFramePermissions": []
+}
