@@ -184,11 +184,14 @@ export default function App() {
     setContextCache(prev => ({ ...prev, status: 'loading' }));
 
     try {
+      // FIX: Pass systemInstruction and enableGoogleSearch to cache
       const { name, sizeBytes } = await createCache(
         apiKey,
         config.model,
         file,
-        contextCache.ttlSeconds
+        contextCache.ttlSeconds,
+        systemInstruction,
+        config.enableGoogleSearch
       );
 
       const expirationTime = Date.now() + (contextCache.ttlSeconds * 1000);
@@ -211,22 +214,25 @@ export default function App() {
   };
 
   const handleDeleteCache = async () => {
-      if (contextCache.cacheName && apiKey) {
-          try {
-              await deleteCache(apiKey, contextCache.cacheName);
-          } catch (error) {
-              console.error("Failed to delete cache on server:", error);
-              alert("Warning: Failed to delete cache on server. It will expire automatically.");
-          }
-      }
+    // FIX: Clear UI state first to avoid being stuck in "Active" status
+    setContextCache(prev => ({
+      ...prev,
+      status: 'none',
+      cacheName: undefined,
+      tokenCount: 0,
+      expirationTime: undefined
+    }));
 
-      setContextCache(prev => ({
-          ...prev,
-          status: 'none',
-          cacheName: undefined,
-          tokenCount: 0,
-          expirationTime: undefined
-      }));
+    // Try to delete on server side
+    if (contextCache.cacheName && apiKey) {
+      try {
+        await deleteCache(apiKey, contextCache.cacheName);
+      } catch (error) {
+        // FIX: Silently handle 403/404 errors - only log to console
+        // Since we've already cleared the UI state, this shouldn't disrupt the user
+        console.warn("Attempted to delete cache on server but failed (it may have already expired):", error);
+      }
+    }
   };
 
   const updateCost = (inputText: string, outputText: string, exactInput?: number, exactOutput?: number) => {

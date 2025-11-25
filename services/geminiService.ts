@@ -57,10 +57,8 @@ export const createChatSession = (
       generationConfig.thinkingConfig = { thinkingBudget: 1024 };
   }
 
-  const sessionConfig: any = {
-    // Only include systemInstruction if it is not empty
-    ...(systemInstruction ? { systemInstruction } : {}),
-    tools: config.enableGoogleSearch ? [{ googleSearch: {} }] : [],
+  // --- FIX: Handle Cache Limitations ---
+  let sessionConfig: any = {
     safetySettings: [
         { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
         { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
@@ -70,10 +68,18 @@ export const createChatSession = (
     ...generationConfig
   };
 
-  // If a cache is active and valid, use it
   if (cachedContentName) {
+    // API LIMITATION: If cachedContent is present, we CANNOT send systemInstruction or tools 
+    // in the GenerateContent request. They must be baked into the cache itself.
     sessionConfig.cachedContent = cachedContentName;
+  } else {
+    // Only apply dynamic system instructions and tools if NOT using a cache
+    if (systemInstruction) {
+        sessionConfig.systemInstruction = systemInstruction;
+    }
+    sessionConfig.tools = config.enableGoogleSearch ? [{ googleSearch: {} }] : [];
   }
+  // --- FIX END ---
 
   return ai.chats.create({
     model: modelId,
@@ -86,7 +92,9 @@ export const createCache = async (
   apiKey: string,
   model: string,
   file: File,
-  ttlSeconds: number
+  ttlSeconds: number,
+  systemInstruction?: string,
+  enableGoogleSearch?: boolean
 ): Promise<{ name: string; sizeBytes: number }> => {
   const ai = new GoogleGenAI({ apiKey });
   
@@ -109,15 +117,28 @@ export const createCache = async (
        };
   }
   
+  const cacheConfig: any = {
+      contents: [{
+          role: 'user',
+          parts: [part]
+      }],
+      ttl: `${ttlSeconds}s`
+  };
+
+  // Bake system instruction into the cache
+  if (systemInstruction) {
+      cacheConfig.systemInstruction = {
+          parts: [{ text: systemInstruction }]
+      };
+  }
+  
+  // Note: Google Search tools are typically runtime features and may not be supported in cache config.
+  // The API limitation requires us to choose between cache or dynamic tools in the request.
+  // We prioritize cache functionality here.
+
   const cache = await ai.caches.create({
       model: model,
-      config: {
-          contents: [{
-              role: 'user',
-              parts: [part]
-          }],
-          ttl: `${ttlSeconds}s`
-      }
+      config: cacheConfig
   });
 
   return { 
