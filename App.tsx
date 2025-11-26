@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
 import MainChat from './components/MainChat';
 import RightPanel from './components/RightPanel';
+import BulkRunPanel from './components/BulkRunPanel';
 import { SessionData, ModelConfig, ChatMessage, Role, Attachment, ContextCacheConfig } from './types';
 import { DEFAULT_CONFIG, INITIAL_SYSTEM_INSTRUCTION, AVAILABLE_MODELS } from './constants';
 import { createChatSession, streamMessage, estimateTokens, createCache, formatHistory, deleteCache, getBatchJob } from './services/geminiService';
@@ -26,6 +27,7 @@ export default function App() {
   const [todayCost, setTodayCost] = useState(0);
   const [monthCost, setMonthCost] = useState(0);
   const [batchJobs, setBatchJobs] = useState<BatchJobRecord[]>([]);
+  const [activeView, setActiveView] = useState<'chat' | 'bulk'>('chat');
   
   // Ref for persistent ChatSession
   const chatSessionRef = React.useRef<any>(null);
@@ -411,17 +413,46 @@ export default function App() {
         batchJobs={batchJobs}
         onCheckBatchStatus={handleCheckBatchStatus}
         onDeleteBatchJob={handleDeleteBatchJob}
+        activeView={activeView}
+        onViewChange={setActiveView}
       />
 
-      <MainChat 
-        systemInstruction={systemInstruction}
-        setSystemInstruction={setSystemInstruction}
-        messages={messages}
-        onSendMessage={handleSendMessage}
-        isStreaming={isStreaming}
-        onRegenerate={() => {}}
-        onEditMessage={handleEditMessage}
-      />
+      {activeView === 'chat' ? (
+        <MainChat 
+          systemInstruction={systemInstruction}
+          setSystemInstruction={setSystemInstruction}
+          messages={messages}
+          onSendMessage={handleSendMessage}
+          isStreaming={isStreaming}
+          onRegenerate={() => {}}
+          onEditMessage={handleEditMessage}
+        />
+      ) : (
+        <BulkRunPanel 
+            apiKey={apiKey}
+            config={config}
+            contextCache={contextCache}
+            onUpdateCost={(inTokens, outTokens) => {
+                 const modelData = AVAILABLE_MODELS.find(m => m.id === config.model) || AVAILABLE_MODELS[0];
+                 const cost = (inTokens / 1000000 * modelData.costInput) + (outTokens / 1000000 * modelData.costOutput);
+                 setTotalCost(prev => prev + cost);
+                 
+                 // Save record
+                 const now = new Date();
+                 saveCostRecord({
+                    date: now.toISOString().split('T')[0],
+                    model: config.model,
+                    inputTokens: inTokens,
+                    outputTokens: outTokens,
+                    cost: cost
+                });
+
+                 setTodayCost(prev => prev + cost);
+                 setMonthCost(prev => prev + cost);
+            }}
+            onDeleteCache={handleDeleteCache}
+        />
+      )}
 
       <RightPanel 
         config={config}

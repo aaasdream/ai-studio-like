@@ -13,6 +13,8 @@ interface SidebarProps {
   batchJobs: BatchJobRecord[];
   onCheckBatchStatus: (job: BatchJobRecord) => void;
   onDeleteBatchJob: (id: string, e: React.MouseEvent) => void;
+  activeView: 'chat' | 'bulk';
+  onViewChange: (view: 'chat' | 'bulk') => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ 
@@ -25,7 +27,9 @@ const Sidebar: React.FC<SidebarProps> = ({
   onImportSession,
   batchJobs,
   onCheckBatchStatus,
-  onDeleteBatchJob
+  onDeleteBatchJob,
+  activeView,
+  onViewChange
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<'chats' | 'batch'>('chats');
@@ -46,38 +50,66 @@ const Sidebar: React.FC<SidebarProps> = ({
   return (
     <div className="w-64 flex-shrink-0 bg-studio-bg border-r border-studio-border h-full flex flex-col">
       <div className="p-4 space-y-3">
-        {/* Create New Button */}
-        <button 
-          onClick={onNewChat}
-          className="w-full flex items-center justify-center gap-2 bg-studio-primary text-studio-bg font-medium py-3 rounded-full hover:opacity-90 transition-opacity"
-        >
-          <Plus size={20} />
-          <span>Create new</span>
-        </button>
-
-        {/* Tabs */}
-        <div className="flex bg-studio-panel p-1 rounded-lg">
+        {/* View Switcher (Chat vs Bulk) */}
+        <div className="flex bg-studio-panel p-1 rounded-lg border border-studio-border mb-2">
             <button 
-                onClick={() => setActiveTab('chats')}
-                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all flex items-center justify-center gap-2 ${
-                    activeTab === 'chats' ? 'bg-[#333] text-white shadow' : 'text-gray-400 hover:text-gray-200'
+                onClick={() => onViewChange('chat')}
+                className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-2 transition-all ${
+                    activeView === 'chat' ? 'bg-[#333] text-white shadow' : 'text-gray-500 hover:text-gray-300'
                 }`}
             >
-                <MessageSquare size={14} /> Chats
+                <MessageSquare size={14} /> Chat
             </button>
             <button 
-                 onClick={() => setActiveTab('batch')}
-                 className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all flex items-center justify-center gap-2 ${
-                    activeTab === 'batch' ? 'bg-[#333] text-white shadow' : 'text-gray-400 hover:text-gray-200'
+                 onClick={() => onViewChange('bulk')}
+                 className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-2 transition-all ${
+                    activeView === 'bulk' ? 'bg-purple-900/30 text-purple-200 border border-purple-800' : 'text-gray-500 hover:text-gray-300'
                 }`}
             >
-                <Layers size={14} /> Batch
+                <Layers size={14} /> Bulk
             </button>
         </div>
+
+        {activeView === 'chat' && (
+             <button 
+                onClick={onNewChat}
+                className="w-full flex items-center justify-center gap-2 bg-studio-primary text-studio-bg font-medium py-3 rounded-full hover:opacity-90 transition-opacity"
+            >
+                <Plus size={20} />
+                <span>Create new</span>
+            </button>
+        )}
+
+        {/* List Tabs */}
+        {activeView === 'chat' && (
+            <div className="flex bg-studio-panel p-1 rounded-lg">
+                <button 
+                    onClick={() => setActiveTab('chats')}
+                    className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all flex items-center justify-center gap-2 ${
+                        activeTab === 'chats' ? 'bg-[#333] text-white shadow' : 'text-gray-400 hover:text-gray-200'
+                    }`}
+                >
+                    <MessageSquare size={14} /> Chats
+                </button>
+                <button 
+                    onClick={() => setActiveTab('batch')}
+                    className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all flex items-center justify-center gap-2 ${
+                        activeTab === 'batch' ? 'bg-[#333] text-white shadow' : 'text-gray-400 hover:text-gray-200'
+                    }`}
+                >
+                    <Layers size={14} /> Async Jobs
+                </button>
+            </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-2">
-        {activeTab === 'chats' ? (
+        {activeView === 'bulk' ? (
+            <div className="p-4 text-center text-sm text-gray-500 italic">
+                <p>Bulk Runner Active</p>
+                <p className="text-xs mt-2">Use the main panel to run concurrent requests against your cached context.</p>
+            </div>
+        ) : activeTab === 'chats' ? (
             <>
                 <div className="mb-2 px-3 text-xs font-semibold text-studio-subtext uppercase tracking-wider">
                 Recents
@@ -112,7 +144,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         ) : (
             <>
                 <div className="mb-2 px-3 text-xs font-semibold text-studio-subtext uppercase tracking-wider">
-                Batch History
+                Async Batch History
                 </div>
                 <ul className="space-y-2">
                     {batchJobs.map((job) => (

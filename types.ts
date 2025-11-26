@@ -73,3 +73,11 @@ export type StreamChunk = {
         totalTokenCount: number;
     };
 };
+
+export interface BulkQAPair {
+  id: string;
+  question: string;
+  answer: string;
+  status: 'pending' | 'loading' | 'success' | 'error';
+  cost?: number;
+}

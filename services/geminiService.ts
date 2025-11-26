@@ -82,6 +82,51 @@ export const createChatSession = (
   });
 };
 
+export const generateSingleContent = async (
+  apiKey: string,
+  config: ModelConfig,
+  prompt: string,
+  cachedContentName?: string
+): Promise<{ text: string; usageMetadata?: any }> => {
+  const ai = new GoogleGenAI({ apiKey });
+  const modelId = config.model;
+
+  const generationConfig: any = {
+    temperature: config.temperature,
+    topP: config.topP,
+    topK: config.topK,
+    maxOutputTokens: config.maxOutputTokens,
+  };
+
+  if (modelId.includes('gemini-3')) {
+      generationConfig.thinkingLevel = config.thinkingLevel || 'HIGH';
+  }
+
+  const requestConfig: any = {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    ...generationConfig
+  };
+
+  // 關鍵：如果有快取名稱，就帶入
+  if (cachedContentName) {
+    requestConfig.cachedContent = cachedContentName;
+  }
+
+  const model = ai.getGenerativeModel({ 
+      model: modelId,
+      ...generationConfig // Apply config at model level or request level depending on SDK version, safe to apply here too
+  });
+
+  // SDK 1.30.0+ uses generateContent
+  const result = await model.generateContent(requestConfig);
+  const response = result.response;
+  
+  return {
+      text: response.text(),
+      usageMetadata: response.usageMetadata
+  };
+};
+
 export const createCache = async (
   apiKey: string,
   model: string,
