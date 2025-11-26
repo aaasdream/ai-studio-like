@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Plus, MessageSquare, Save, Trash2, Download, Upload, Layers, RefreshCw, CheckCircle, Clock, AlertCircle } from 'lucide-react';
 import { SessionData, BatchJobRecord } from '../types';
+import { APP_VERSION } from '../constants';
 
 interface SidebarProps {
   sessions: SessionData[];
@@ -212,6 +213,10 @@ const Sidebar: React.FC<SidebarProps> = ({
             accept=".json"
             onChange={handleFileChange} 
          />
+         
+         <div className="pt-2 text-center">
+            <span className="text-xs text-gray-600">Version {APP_VERSION}</span>
+         </div>
       </div>
     </div>
   );

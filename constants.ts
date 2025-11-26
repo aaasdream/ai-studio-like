@@ -18,4 +18,6 @@ export const DEFAULT_CONFIG: ModelConfig = {
   enableGoogleSearch: true,
 };
 
-export const INITIAL_SYSTEM_INSTRUCTION = "";
+export const INITIAL_SYSTEM_INSTRUCTION = '';
+
+export const APP_VERSION = 'v1.0.0';
