@@ -35,6 +35,7 @@ const BulkRunPanel: React.FC<BulkRunPanelProps> = ({
   const [isRunning, setIsRunning] = useState(false);
   const [autoDeleteCache, setAutoDeleteCache] = useState(true);
   const [ttlMinutes, setTtlMinutes] = useState<number>(5); // Default 5 mins
+  const [concurrency, setConcurrency] = useState<number>(1); // Default 1 to avoid 503
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
   
   // Context File State
@@ -167,6 +168,11 @@ const BulkRunPanel: React.FC<BulkRunPanelProps> = ({
               }
               activeCacheName = result.name;
               currentRunningCacheRef.current = activeCacheName;
+              
+              // Warm-up wait
+              setCreationStatus(`✅ Cache Created (ID: ${activeCacheName.slice(-10)}). Warming up (5s)...`);
+              await new Promise(resolve => setTimeout(resolve, 5000)); 
+
               setCreationStatus('Cache Ready. Starting Batch...');
           } else {
               // No new file, check if we have an existing active cache
@@ -192,27 +198,28 @@ const BulkRunPanel: React.FC<BulkRunPanelProps> = ({
       if (signal.aborted) return;
 
       // Step 2: Start Batch
-      const CONCURRENCY = 5;
+      // 降低併發數以避免 503 Overloaded 錯誤 (建議 3-5)
+      const CONCURRENCY = concurrency;
       const pendingItems = activeSession.items.filter(i => i.status === 'pending' || i.status === 'error');
       
+      // Queue for processing (supports re-queueing)
+      const queue: { item: BatchFileItem, retries: number }[] = pendingItems.map(i => ({ item: i, retries: 0 }));
+
       let currentSessionState = { ...activeSession, cacheNameUsed: activeCacheName }; 
-      let startedFilesCount = activeSession.totalFiles - pendingItems.length; 
       let cacheDeleted = false;
 
-      // Helper to process one item
-      const processItem = async (item: BatchFileItem) => {
-           if (signal.aborted) return;
+      // Helper to process one item (Returns true if success, false if failed)
+      const processItem = async (queueItem: { item: BatchFileItem, retries: number }): Promise<boolean> => {
+           const { item } = queueItem;
+           if (signal.aborted) return false;
 
            // Update status to loading
            currentSessionState = updateItemInSession(currentSessionState, item.id, { status: 'loading' });
            setSessions(prev => prev.map(s => s.id === currentSessionState.id ? currentSessionState : s));
 
            try {
-               // --- 關鍵修改：強制 Prompt 關聯 Cache ---
                let finalPrompt = item.question;
-               
                if (activeCacheName) {
-                   // 這是讓模型知道必須看 Cache 的關鍵
                    finalPrompt = `[System Instruction: You have access to a cached document. Please answer the user's question strictly based on that document.]\n\nUser Question:\n${item.question}`;
                }
 
@@ -220,21 +227,10 @@ const BulkRunPanel: React.FC<BulkRunPanelProps> = ({
                    apiKey,
                    config,
                    finalPrompt,
-                   activeCacheName,
-                   () => {
-                       // onFirstToken callback
-                       startedFilesCount++;
-                       // 當最後一個檔案開始跑時，自動刪除 (Cost Saver)
-                       if (autoDeleteCache && activeCacheName && startedFilesCount === currentSessionState.totalFiles && !cacheDeleted && !signal.aborted) {
-                           console.log("All requests active. Deleting cache early.");
-                           cacheDeleted = true;
-                           currentRunningCacheRef.current = undefined;
-                           onDeleteCache(); 
-                       }
-                   }
+                   activeCacheName
+                   // Removed onFirstToken callback to prevent early cache deletion which breaks retries
                );
 
-               // Cost
                if (response.usageMetadata) {
                    onUpdateCost(response.usageMetadata.promptTokenCount, response.usageMetadata.candidatesTokenCount);
                }
@@ -247,29 +243,70 @@ const BulkRunPanel: React.FC<BulkRunPanelProps> = ({
                        candidates: response.usageMetadata?.candidatesTokenCount || 0
                    }
                });
+               
+               if (!signal.aborted) {
+                   setSessions(prev => prev.map(s => s.id === currentSessionState.id ? currentSessionState : s));
+                   saveLocalBatchSession(currentSessionState);
+               }
+               return true;
 
            } catch (err: any) {
-               if (signal.aborted) return; // 忽略被中斷的錯誤
-               console.error(err);
+               if (signal.aborted) return false;
+               console.error(`Error processing item ${item.id}:`, err);
+               
                currentSessionState = updateItemInSession(currentSessionState, item.id, { 
                    status: 'error', 
                    errorMsg: err.message 
                });
-           }
-           
-           if (!signal.aborted) {
-               setSessions(prev => prev.map(s => s.id === currentSessionState.id ? currentSessionState : s));
-               saveLocalBatchSession(currentSessionState);
+               
+               if (!signal.aborted) {
+                   setSessions(prev => prev.map(s => s.id === currentSessionState.id ? currentSessionState : s));
+               }
+               return false;
            }
       };
 
-      // Chunked execution
-      for (let i = 0; i < pendingItems.length; i += CONCURRENCY) {
+      // Dynamic Concurrency Pool with Re-queueing
+      const executing: Promise<void>[] = [];
+
+      while (queue.length > 0 || executing.length > 0) {
           if (signal.aborted) break;
-          if (activeSessionId !== currentSessionState.id) break; // User switched session
-          const chunk = pendingItems.slice(i, i + CONCURRENCY);
-          await Promise.all(chunk.map(item => processItem(item)));
+          if (activeSessionId !== currentSessionState.id) break;
+
+          // Fill the pool
+          while (queue.length > 0 && executing.length < concurrency) {
+              const queueItem = queue.shift();
+              if (!queueItem) break;
+
+              // Throttling to avoid 503
+              await new Promise(resolve => setTimeout(resolve, 1000));
+
+              const p = processItem(queueItem).then(async (success) => {
+                  if (!success) {
+                      // Handle Retry
+                      if (queueItem.retries < 5) { // MAX_RETRIES = 5
+                          queueItem.retries++;
+                          const delay = Math.pow(2, queueItem.retries) * 2000; // Increased backoff
+                          console.log(`Re-queueing item ${queueItem.item.id} in ${delay}ms (Attempt ${queueItem.retries})`);
+                          
+                          await new Promise(r => setTimeout(r, delay));
+                          queue.push(queueItem);
+                      } else {
+                          console.error(`Item ${queueItem.item.id} failed after ${queueItem.retries} retries.`);
+                      }
+                  }
+              });
+              executing.push(p);
+          }
+
+          if (executing.length === 0 && queue.length === 0) break;
+
+          // Wait for one to finish
+          const index = await Promise.race(executing.map((p, i) => p.then(() => i)));
+          executing.splice(index, 1);
       }
+      
+      await Promise.all(executing);
 
       // 如果是正常跑完 (非中斷)，且還沒刪 Cache，則執行刪除
       if (!signal.aborted) {
@@ -573,7 +610,31 @@ const BulkRunPanel: React.FC<BulkRunPanelProps> = ({
                                             disabled={isRunning}
                                         />
                                     </div>
+
+                                    <div className="flex items-center gap-2 border-l border-gray-700 pl-4">
+                                        <span className="text-xs text-gray-500" title="Requests at the same time">Concurrency:</span>
+                                        <input 
+                                            type="number" 
+                                            min="1"
+                                            max="5" 
+                                            value={concurrency}
+                                            onChange={(e) => setConcurrency(parseInt(e.target.value) || 1)}
+                                            className="w-12 bg-[#131314] border border-studio-border rounded px-2 py-1 text-xs text-gray-300 focus:border-studio-primary outline-none"
+                                            disabled={isRunning}
+                                        />
+                                    </div>
                                 </div>
+                                
+                                {creationStatus && (
+                                    <div className={`mt-2 text-xs flex items-center gap-2 ${
+                                        creationStatus.includes('✅') || creationStatus.includes('Ready') 
+                                            ? 'text-green-400' 
+                                            : 'text-yellow-400'
+                                    }`}>
+                                        <Loader2 size={12} className={isRunning && !creationStatus.includes('Stopped') ? "animate-spin" : ""}/> 
+                                        {creationStatus}
+                                    </div>
+                                )}
                             </div>
                         )}
 

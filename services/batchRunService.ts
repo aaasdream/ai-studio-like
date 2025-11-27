@@ -61,11 +61,13 @@ export const createZipFromSession = async (session: BatchSession): Promise<Blob>
     // Create a folder inside the zip
     const folder = zip.folder(sanitizeFileName(session.name));
 
-    session.items.forEach(item => {
+    session.items.forEach((item, index) => {
         // Filename rule: Use first line of question as filename (as requested)
         const firstLine = item.question.split('\n')[0].trim();
         const safeName = sanitizeFileName(firstLine) || sanitizeFileName(item.originalFileName.replace('.txt', ''));
-        const fileName = `${safeName}.txt`;
+        
+        // Add index to prevent overwriting files with same name
+        const fileName = `${index + 1}_${safeName}.txt`;
         
         // Content: Question + Answer
         const content = `=== QUESTION ===\n${item.question}\n\n=== ANSWER ===\n${item.answer || (item.errorMsg ? `ERROR: ${item.errorMsg}` : '')}`;

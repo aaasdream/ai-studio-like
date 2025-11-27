@@ -243,13 +243,23 @@ export default function App() {
     }
   };
 
-  const updateCost = (inputText: string, outputText: string, exactInput?: number, exactOutput?: number) => {
+  const updateCost = (
+    inputText: string, 
+    outputText: string, 
+    exactInput?: number, 
+    exactOutput?: number,
+    cachedInput?: number
+  ) => {
     const modelData = AVAILABLE_MODELS.find(m => m.id === config.model) || AVAILABLE_MODELS[0];
     
-    const inTokens = exactInput !== undefined ? exactInput : estimateTokens(inputText);
+    const totalInput = exactInput !== undefined ? exactInput : estimateTokens(inputText);
     const outTokens = exactOutput !== undefined ? exactOutput : estimateTokens(outputText);
+    const cachedTokens = cachedInput || 0;
+
+    // Billable Input = Total Input - Cached Input
+    const billableInput = Math.max(0, totalInput - cachedTokens);
     
-    const cost = (inTokens / 1000000 * modelData.costInput) + (outTokens / 1000000 * modelData.costOutput);
+    const cost = (billableInput / 1000000 * modelData.costInput) + (outTokens / 1000000 * modelData.costOutput);
     setTotalCost(prev => prev + cost);
 
     // Save to LocalStorage
@@ -257,7 +267,7 @@ export default function App() {
     saveCostRecord({
         date: now.toISOString().split('T')[0],
         model: config.model,
-        inputTokens: inTokens,
+        inputTokens: billableInput, // Record billable tokens
         outputTokens: outTokens,
         cost: cost
     });
@@ -344,7 +354,15 @@ export default function App() {
       }
       
       if (finalUsageMetadata) {
-          updateCost(text, fullText, finalUsageMetadata.promptTokenCount, finalUsageMetadata.candidatesTokenCount);
+          // Try to get cachedContentTokenCount (cast to any as types might be outdated)
+          const cachedCount = (finalUsageMetadata as any).cachedContentTokenCount || 0;
+          updateCost(
+              text, 
+              fullText, 
+              finalUsageMetadata.promptTokenCount, 
+              finalUsageMetadata.candidatesTokenCount,
+              cachedCount
+          );
       } else {
           updateCost(text, fullText);
       }
