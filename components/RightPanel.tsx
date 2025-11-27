@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Info, Layers, DollarSign, Database, Upload, Key, RefreshCw, Trash, CheckCircle, AlertCircle, Clock, BrainCircuit } from 'lucide-react';
+import { Settings, Info, Layers, DollarSign, Database, Upload, Key, RefreshCw, Trash, CheckCircle, AlertCircle, Clock, BrainCircuit, Server, ShieldAlert } from 'lucide-react';
 import { ModelConfig, ContextCacheConfig } from '../types';
 import { AVAILABLE_MODELS } from '../constants';
 
-import { createBatchJob } from '../services/geminiService';
+import { createBatchJob, listActiveCaches, deleteCache } from '../services/geminiService';
 
 interface RightPanelProps {
   config: ModelConfig;
@@ -37,6 +37,10 @@ const RightPanel: React.FC<RightPanelProps> = ({
   const [isOpen, setIsOpen] = useState(true);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [timeRemaining, setTimeRemaining] = useState<string>("");
+  
+  // Cloud Cache Manager State
+  const [activeCloudCaches, setActiveCloudCaches] = useState<{ name: string, model: string, expireTime: string }[]>([]);
+  const [isCheckingCloud, setIsCheckingCloud] = useState(false);
 
   const isGemini3 = config.model.includes('gemini-3');
 
@@ -113,6 +117,55 @@ const RightPanel: React.FC<RightPanelProps> = ({
       // Simplified generic calc: $2.00 avg / 1M / hour
       const costPerHour = (contextCache.tokenCount / 1000000) * 2.00;
       return costPerHour;
+  };
+
+  // --- Cloud Cache Manager Logic ---
+  const handleCheckCloudCaches = async () => {
+      if (!apiKey) return alert("Please enter API Key first.");
+      setIsCheckingCloud(true);
+      try {
+          const caches = await listActiveCaches(apiKey);
+          setActiveCloudCaches(caches);
+          if (caches.length === 0) {
+              alert("No active caches found on server. You are safe! ✅");
+          }
+      } catch (e: any) {
+          alert("Failed to list caches: " + e.message);
+      } finally {
+          setIsCheckingCloud(false);
+      }
+  };
+
+  const handleDeleteCloudCache = async (name: string) => {
+      if (!confirm("Delete this cache from server?")) return;
+      try {
+          await deleteCache(apiKey, name);
+          setActiveCloudCaches(prev => prev.filter(c => c.name !== name));
+          // If we deleted the currently active cache in UI, clear it
+          if (contextCache.cacheName === name) {
+              onDeleteCache(); 
+          }
+      } catch (e: any) {
+          alert("Delete failed: " + e.message);
+      }
+  };
+
+  const handleDeleteAllCloudCaches = async () => {
+      if (!confirm(`WARNING: This will delete ALL ${activeCloudCaches.length} active caches from your Google account.\nConfirm?`)) return;
+      
+      setIsCheckingCloud(true);
+      try {
+          for (const c of activeCloudCaches) {
+              await deleteCache(apiKey, c.name);
+          }
+          setActiveCloudCaches([]);
+          onDeleteCache(); // Clear UI state too
+          alert("All caches deleted successfully.");
+      } catch (e: any) {
+          alert("Some deletions failed: " + e.message);
+      } finally {
+          setIsCheckingCloud(false);
+      }
   };
 
   return (
@@ -278,6 +331,52 @@ const RightPanel: React.FC<RightPanelProps> = ({
 
         <hr className="border-studio-border" />
 
+        {/* --- NEW: Cloud Cache Audit Section --- */}
+        <div className="space-y-2">
+            <label className="text-xs font-semibold text-studio-subtext flex items-center gap-2 text-yellow-500">
+                <Server size={14} /> CLOUD CACHE AUDIT
+            </label>
+            <div className="p-3 bg-[#1a1a1a] border border-yellow-900/30 rounded">
+                <p className="text-[10px] text-gray-400 mb-2">
+                    Check for "Zombie Caches" that might be billing you but are not visible in the app.
+                </p>
+                <button 
+                    onClick={handleCheckCloudCaches}
+                    disabled={isCheckingCloud}
+                    className="w-full py-1.5 bg-studio-panel border border-studio-border hover:bg-[#2a2b2e] rounded text-xs flex items-center justify-center gap-2 transition-colors"
+                >
+                    {isCheckingCloud ? <RefreshCw size={12} className="animate-spin"/> : <Server size={12} />}
+                    {isCheckingCloud ? "Scanning Server..." : "Scan Active Caches"}
+                </button>
+
+                {activeCloudCaches.length > 0 && (
+                    <div className="mt-3 space-y-2 animate-in fade-in">
+                        <div className="flex justify-between items-center text-xs text-yellow-400 font-bold">
+                            <span>{activeCloudCaches.length} Active Caches Found</span>
+                            <button onClick={handleDeleteAllCloudCaches} className="text-red-400 hover:underline flex items-center gap-1">
+                                <Trash size={10} /> Delete All
+                            </button>
+                        </div>
+                        <div className="max-h-32 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
+                            {activeCloudCaches.map(c => (
+                                <div key={c.name} className="flex justify-between items-center bg-black p-1.5 rounded border border-studio-border">
+                                    <div className="overflow-hidden">
+                                        <div className="text-[10px] text-gray-300 truncate w-32" title={c.name}>{c.name.split('/').pop()}</div>
+                                        <div className="text-[9px] text-gray-500">{c.model}</div>
+                                    </div>
+                                    <button onClick={() => handleDeleteCloudCache(c.name)} className="text-gray-500 hover:text-red-400 p-1">
+                                        <Trash size={12} />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+
+        <hr className="border-studio-border" />
+
         {/* Explicit Context Caching */}
         <div className="space-y-2">
             <label className="text-xs font-semibold text-studio-subtext flex items-center gap-2">
@@ -391,6 +490,62 @@ const RightPanel: React.FC<RightPanelProps> = ({
                 <p className="text-[10px] text-gray-500">Save 50% on costs</p>
                 <span className="text-[10px] text-green-500 bg-green-900/20 px-1 rounded">Active</span>
               </div>
+           </div>
+
+           {/* Cloud Cache Manager */}
+           <div className="pt-4">
+              <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold">Cloud Cache Manager</h3>
+                  <button 
+                      onClick={handleCheckCloudCaches}
+                      className="px-3 py-1 text-xs bg-studio-primary text-studio-bg rounded hover:opacity-90 transition-opacity flex items-center gap-1"
+                  >
+                      {isCheckingCloud ? (
+                          <RefreshCw className="animate-spin" size={14} />
+                      ) : (
+                          <Server size={14} />
+                      )}
+                      Check Caches
+                  </button>
+              </div>
+
+              {activeCloudCaches.length === 0 ? (
+                  <p className="text-xs text-gray-500 text-center py-4">
+                      No active caches found. Upload a file to create a cache.
+                  </p>
+              ) : (
+                  <div className="space-y-3">
+                      {activeCloudCaches.map(cache => (
+                          <div key={cache.name} className="p-3 bg-studio-panel rounded border border-studio-border flex flex-col gap-2">
+                              <div className="flex justify-between items-center">
+                                  <div className="text-sm font-medium truncate">{cache.name}</div>
+                                  <button 
+                                      onClick={() => handleDeleteCloudCache(cache.name)}
+                                      className="text-red-400 hover:text-red-300 text-xs"
+                                  >
+                                      <Trash size={12} />
+                                  </button>
+                              </div>
+                              <div className="flex flex-wrap gap-2 text-xs">
+                                  <span className="bg-[#2a2b2e] rounded-full px-3 py-1 font-mono">{cache.model}</span>
+                                  <span className="bg-[#2a2b2e] rounded-full px-3 py-1 font-mono">{cache.tokenCount} tokens</span>
+                                  <span className="bg-[#2a2b2e] rounded-full px-3 py-1 font-mono">{cache.expireTime}</span>
+                              </div>
+                          </div>
+                      ))}
+
+                      {/* Delete All Button */}
+                      <div className="flex justify-center">
+                          <button 
+                              onClick={handleDeleteAllCloudCaches}
+                              className="px-4 py-2 text-xs bg-red-500 text-studio-bg rounded hover:opacity-90 transition-opacity flex items-center gap-1"
+                          >
+                              <Trash size={14} />
+                              Delete All Caches
+                          </button>
+                      </div>
+                  </div>
+              )}
            </div>
       </div>
 

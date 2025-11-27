@@ -8,16 +8,16 @@ export const AVAILABLE_MODELS = [
 ];
 
 export const DEFAULT_CONFIG: ModelConfig = {
-  model: 'gemini-2.5-flash',
-  temperature: 1,
+  model: 'gemini-3-pro-preview', // 修改：預設為 Gemini 3 Pro
+  temperature: 1, // Gemini 3 建議預設 1
   topP: 0.95,
   topK: 64,
   maxOutputTokens: 65536,
   safetySettings: 'BLOCK_NONE',
-  thinkingLevel: 'HIGH', // Default for Gemini 3
+  thinkingLevel: 'HIGH', 
   enableGoogleSearch: true,
 };
 
 export const INITIAL_SYSTEM_INSTRUCTION = '';
 
-export const APP_VERSION = 'v1.0.0';
+export const APP_VERSION = 'v1.0.6';

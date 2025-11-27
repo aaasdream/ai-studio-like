@@ -177,13 +177,15 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  const handleCreateCache = async (file: File) => {
+  const handleCreateCache = async (file: File, ttlSeconds?: number): Promise<{ name: string } | null> => {
     if (!apiKey) {
       alert("Please enter API Key first.");
-      return;
+      return null;
     }
     
     setContextCache(prev => ({ ...prev, status: 'loading' }));
+
+    const finalTTL = ttlSeconds || contextCache.ttlSeconds;
 
     try {
       // FIX: Pass systemInstruction and enableGoogleSearch to cache
@@ -191,12 +193,12 @@ export default function App() {
         apiKey,
         config.model,
         file,
-        contextCache.ttlSeconds,
+        finalTTL,
         systemInstruction,
         config.enableGoogleSearch
       );
 
-      const expirationTime = Date.now() + (contextCache.ttlSeconds * 1000);
+      const expirationTime = Date.now() + (finalTTL * 1000);
 
       setContextCache(prev => ({
         ...prev,
@@ -205,13 +207,17 @@ export default function App() {
         fileName: file.name,
         // Approx tokens from bytes (very rough: 1 token ~ 4 bytes)
         tokenCount: Math.ceil(sizeBytes / 4),
-        expirationTime: expirationTime
+        expirationTime: expirationTime,
+        ttlSeconds: finalTTL // Update state with used TTL
       }));
+
+      return { name };
 
     } catch (error) {
       console.error("Cache creation failed:", error);
       alert("Failed to create cache. Ensure your file meets the minimum token requirements (1024 for Flash, 4096 for Pro).");
       setContextCache(prev => ({ ...prev, status: 'error' }));
+      return null;
     }
   };
 
@@ -438,6 +444,8 @@ export default function App() {
             apiKey={apiKey}
             config={config}
             contextCache={contextCache}
+            onCreateCache={handleCreateCache}
+            systemInstruction={systemInstruction}
             onUpdateCost={(inTokens, outTokens) => {
                  const modelData = AVAILABLE_MODELS.find(m => m.id === config.model) || AVAILABLE_MODELS[0];
                  const cost = (inTokens / 1000000 * modelData.costInput) + (outTokens / 1000000 * modelData.costOutput);

@@ -39,6 +39,7 @@ export const createChatSession = (
   const ai = new GoogleGenAI({ apiKey });
   const modelId = config.model;
   
+  // 建立 Generation Config
   const generationConfig: any = {
     temperature: config.temperature,
     topP: config.topP,
@@ -46,57 +47,67 @@ export const createChatSession = (
     maxOutputTokens: config.maxOutputTokens,
   };
 
-  // Gemini 3 Logic: Use thinkingLevel
   if (modelId.includes('gemini-3')) {
       generationConfig.thinkingLevel = config.thinkingLevel || 'HIGH'; 
-      // Ensure temperature is 1 for best results as per docs, unless explicitly changed by user knowing risks
-      // We apply user config, but UI warns if not 1.0
-  } 
-  // Gemini 2.5 Thinking Logic: Use thinkingBudget
-  else if (modelId.includes('thinking')) {
+  } else if (modelId.includes('thinking')) {
       generationConfig.thinkingConfig = { thinkingBudget: 1024 };
   }
 
-  // --- FIX: Handle Cache Limitations ---
-  let sessionConfig: any = {
-    safetySettings: [
-        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
-    ],
-    ...generationConfig
-  };
+  // 設定 Safety Settings
+  const safetySettings = [
+      { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+  ];
+  
+  // 將 safetySettings 加入 generationConfig (SDK 結構需求)
+  generationConfig.safetySettings = safetySettings;
 
+  // --- FIX: 依照 API 文件，cachedContent 必須放在 config 物件內 ---
   if (cachedContentName) {
-    // API LIMITATION: If cachedContent is present, we CANNOT send systemInstruction or tools 
-    // in the GenerateContent request. They must be baked into the cache itself.
-    sessionConfig.cachedContent = cachedContentName;
+    generationConfig.cachedContent = cachedContentName;
   } else {
-    // Only apply dynamic system instructions and tools if NOT using a cache
+    // 只有在沒有快取時，才動態加入 systemInstruction
     if (systemInstruction) {
-        sessionConfig.systemInstruction = systemInstruction;
+        generationConfig.systemInstruction = systemInstruction;
     }
-    sessionConfig.tools = config.enableGoogleSearch ? [{ googleSearch: {} }] : [];
+    // Tools 也是
+    if (config.enableGoogleSearch) {
+        generationConfig.tools = [{ googleSearch: {} }];
+    }
   }
-  // --- FIX END ---
 
   return ai.chats.create({
     model: modelId,
-    config: sessionConfig,
+    config: generationConfig, // 這裡將 config 包進去
     history: history
   });
 };
 
+// 用於一般對話的單次生成 (保留兼容性)
 export const generateSingleContent = async (
   apiKey: string,
   config: ModelConfig,
   prompt: string,
   cachedContentName?: string
 ): Promise<{ text: string; usageMetadata?: any }> => {
+  // Reuse the batch logic but wait for full text
+  return generateBatchContent(apiKey, config, prompt, cachedContentName);
+};
+
+// --- NEW: Batch Generation with First-Token Callback ---
+export const generateBatchContent = async (
+  apiKey: string,
+  config: ModelConfig,
+  prompt: string,
+  cachedContentName?: string,
+  onFirstToken?: () => void
+): Promise<{ text: string; usageMetadata?: any }> => {
   const ai = new GoogleGenAI({ apiKey });
   const modelId = config.model;
 
+  // 1. 準備 Config 物件 (這是 API 讀取設定的關鍵位置)
   const generationConfig: any = {
     temperature: config.temperature,
     topP: config.topP,
@@ -108,28 +119,48 @@ export const generateSingleContent = async (
       generationConfig.thinkingLevel = config.thinkingLevel || 'HIGH';
   }
 
-  const requestConfig: any = {
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    ...generationConfig
-  };
-
-  // 關鍵：如果有快取名稱，就帶入
+  // 重要修正：依照文件，cachedContent 必須位於 config 物件內
   if (cachedContentName) {
-    requestConfig.cachedContent = cachedContentName;
+    generationConfig.cachedContent = cachedContentName;
   }
 
-  const model = ai.getGenerativeModel({ 
+  // 2. 發送請求，注意 config 的層級結構
+  const result = await ai.models.generateContentStream({
       model: modelId,
-      ...generationConfig // Apply config at model level or request level depending on SDK version, safe to apply here too
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: generationConfig // <--- 這裡！所有參數包含 cachedContent 都必須包在這裡面
   });
-
-  // SDK 1.30.0+ uses generateContent
-  const result = await model.generateContent(requestConfig);
-  const response = result.response;
   
+  let fullText = '';
+  let finalMetadata = undefined;
+  let firstTokenReceived = false;
+
+  for await (const chunk of result) {
+      if (!firstTokenReceived) {
+          firstTokenReceived = true;
+          if (onFirstToken) onFirstToken();
+      }
+      
+      let text = '';
+      if (typeof (chunk as any).text === 'function') {
+          text = (chunk as any).text();
+      } else if (typeof (chunk as any).text === 'string') {
+          text = (chunk as any).text;
+      } else if (chunk.candidates && chunk.candidates.length > 0) {
+          const parts = chunk.candidates[0].content?.parts || [];
+          text = parts.map((p: any) => p.text || '').join('');
+      }
+
+      if (text) fullText += text;
+      
+      if (chunk.usageMetadata) {
+          finalMetadata = chunk.usageMetadata;
+      }
+  }
+
   return {
-      text: response.text(),
-      usageMetadata: response.usageMetadata
+      text: fullText,
+      usageMetadata: finalMetadata
   };
 };
 
@@ -304,4 +335,34 @@ export const getBatchJob = async (apiKey: string, jobName: string) => {
          throw new Error(`Failed to get batch job: ${response.statusText}`);
     }
     return await response.json();
+};
+
+// --- 新增：列出伺服器上所有活躍的 Cache ---
+export const listActiveCaches = async (apiKey: string): Promise<{ name: string, model: string, expireTime: string }[]> => {
+    const ai = new GoogleGenAI({ apiKey });
+    const caches: { name: string, model: string, expireTime: string }[] = [];
+    
+    try {
+        // 根據文件，使用 pager 來遍歷所有 pages
+        const pager = await ai.caches.list({ config: { pageSize: 100 } });
+        let page = pager.page;
+        
+        // 修正 TypeScript 迭代邏輯
+        while (page && page.length > 0) {
+            for (const c of page) {
+                caches.push({
+                    name: c.name,
+                    model: c.model,
+                    expireTime: c.expireTime
+                });
+            }
+            if (!pager.hasNextPage()) break;
+            page = await pager.nextPage();
+        }
+    } catch (error) {
+        console.error("Failed to list caches:", error);
+        throw error;
+    }
+    
+    return caches;
 };

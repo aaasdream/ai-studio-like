@@ -81,3 +81,27 @@ export interface BulkQAPair {
   status: 'pending' | 'loading' | 'success' | 'error';
   cost?: number;
 }
+
+export interface BatchFileItem {
+  id: string;
+  originalFileName: string;
+  question: string;
+  answer: string;
+  status: 'pending' | 'loading' | 'success' | 'error';
+  errorMsg?: string;
+  tokenUsage?: {
+      prompt: number;
+      candidates: number;
+  };
+}
+
+export interface BatchSession {
+  id: string;
+  name: string;
+  createdAt: number;
+  totalFiles: number;
+  completedFiles: number;
+  items: BatchFileItem[];
+  cacheNameUsed?: string;
+  isFinished: boolean;
+}

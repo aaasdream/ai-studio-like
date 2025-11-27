@@ -1,8 +1,15 @@
-import React, { useState } from 'react';
-import { Play, Download, Trash2, AlertCircle, CheckCircle, Loader2, FileJson, FileSpreadsheet } from 'lucide-react';
-import { BulkQAPair, ModelConfig, ContextCacheConfig } from '../types';
-import { generateSingleContent, deleteCache } from '../services/geminiService';
-import { AVAILABLE_MODELS } from '../constants';
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+    Play, Download, Trash2, AlertCircle, CheckCircle, Loader2, 
+    FolderInput, FileText, ChevronRight, ChevronDown, Archive, Database, History, X, FileUp, Zap, Square
+} from 'lucide-react';
+import { BatchSession, BatchFileItem, ModelConfig, ContextCacheConfig } from '../types';
+import { generateBatchContent } from '../services/geminiService';
+import { 
+    getLocalBatchSessions, saveLocalBatchSession, deleteLocalBatchSession, 
+    clearAllLocalBatchSessions, readFileContent, createZipFromSession, 
+    sanitizeFileName, updateItemInSession 
+} from '../services/batchRunService';
 
 interface BulkRunPanelProps {
   apiKey: string;
@@ -10,6 +17,8 @@ interface BulkRunPanelProps {
   contextCache: ContextCacheConfig;
   onUpdateCost: (inTokens: number, outTokens: number) => void;
   onDeleteCache: () => void;
+  onCreateCache: (file: File, ttlSeconds?: number) => Promise<{ name: string } | null>;
+  systemInstruction: string;
 }
 
 const BulkRunPanel: React.FC<BulkRunPanelProps> = ({ 
@@ -17,217 +26,664 @@ const BulkRunPanel: React.FC<BulkRunPanelProps> = ({
   config, 
   contextCache, 
   onUpdateCost,
-  onDeleteCache
+  onDeleteCache,
+  onCreateCache,
+  systemInstruction
 }) => {
-  const [inputQuestions, setInputQuestions] = useState("");
-  const [results, setResults] = useState<BulkQAPair[]>([]);
+  const [sessions, setSessions] = useState<BatchSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [autoDeleteCache, setAutoDeleteCache] = useState(true);
+  const [ttlMinutes, setTtlMinutes] = useState<number>(5); // Default 5 mins
+  const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
+  
+  // Context File State
+  const [contextFile, setContextFile] = useState<File | null>(null);
+  const [creationStatus, setCreationStatus] = useState<string>('');
 
-  // 解析問題 (一行一個，排除空行)
-  const parseQuestions = () => {
-    return inputQuestions.split('\n').map(q => q.trim()).filter(q => q.length > 0);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const restoreInputRef = useRef<HTMLInputElement>(null);
+  const contextInputRef = useRef<HTMLInputElement>(null);
+  
+  // 用來控制迴圈停止
+  const abortControllerRef = useRef<AbortController | null>(null);
+  // 用來記錄當前正在使用的 Cache Name，以便緊急停止時刪除
+  const currentRunningCacheRef = useRef<string | undefined>(undefined);
+
+  // Load history on mount
+  useEffect(() => {
+      setSessions(getLocalBatchSessions());
+  }, []);
+
+  // Get active session object
+  const activeSession = sessions.find(s => s.id === activeSessionId);
+
+  const handleContextFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files.length > 0) {
+          setContextFile(e.target.files[0]);
+      }
   };
 
-  const handleRun = async () => {
-    if (!apiKey) return alert("Please enter API Key in settings.");
-    
-    // 強制檢查是否使用了快取，這是使用者的核心需求
-    if (contextCache.status !== 'active' || !contextCache.cacheName) {
-        const confirm = window.confirm("⚠️ 警告：目前沒有作用中的快取 (No Active Cache)。\n這樣會導致每次請求都重複計算 Token 費用，非常昂貴！\n\n確定要繼續嗎？建議先在右側面板上傳文件並建立快取。");
-        if (!confirm) return;
-    }
+  // 緊急停止按鈕
+  const handleStop = async () => {
+      if (!isRunning) return;
+      
+      const confirmStop = confirm("⚠️ 確定要停止嗎？\n這將會中斷剩餘的任務，並立即刪除 Cache 以節省費用。");
+      if (!confirmStop) return;
 
-    const questions = parseQuestions();
-    if (questions.length === 0) return alert("Please enter at least one question.");
+      // 1. 發送中斷訊號
+      if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+      }
+      setIsRunning(false);
+      setCreationStatus('Stopped by user.');
 
-    setIsRunning(true);
-    setResults([]);
-    setProgress(0);
-
-    // 初始化結果列表
-    const initialResults: BulkQAPair[] = questions.map((q, idx) => ({
-        id: idx.toString(),
-        question: q,
-        answer: "",
-        status: 'pending'
-    }));
-    setResults(initialResults);
-
-    // 併發控制 (雖然瀏覽器有 HTTP 限制，但我們可以一次發送一批)
-    // 為了最大化速度，我們使用 Promise.all 但分批次避免瞬間卡死
-    const BATCH_SIZE = 5; 
-    let completedCount = 0;
-
-    for (let i = 0; i < initialResults.length; i += BATCH_SIZE) {
-        const batch = initialResults.slice(i, i + BATCH_SIZE);
-        
-        await Promise.all(batch.map(async (item) => {
-            // 更新狀態為 loading
-            setResults(prev => prev.map(r => r.id === item.id ? { ...r, status: 'loading' } : r));
-
-            try {
-                const response = await generateSingleContent(
-                    apiKey,
-                    config,
-                    item.question,
-                    contextCache.status === 'active' ? contextCache.cacheName : undefined
-                );
-
-                // 更新 Cost
-                if (response.usageMetadata) {
-                    onUpdateCost(response.usageMetadata.promptTokenCount, response.usageMetadata.candidatesTokenCount);
-                }
-
-                setResults(prev => prev.map(r => r.id === item.id ? { 
-                    ...r, 
-                    status: 'success', 
-                    answer: response.text 
-                } : r));
-
-            } catch (err: any) {
-                console.error(err);
-                setResults(prev => prev.map(r => r.id === item.id ? { 
-                    ...r, 
-                    status: 'error', 
-                    answer: `Error: ${err.message}` 
-                } : r));
-            } finally {
-                completedCount++;
-                setProgress(Math.round((completedCount / initialResults.length) * 100));
-            }
-        }));
-    }
-
-    setIsRunning(false);
-    
-    // 自動刪除快取邏輯 (可選，這裡做成按鈕讓用戶自己點比較安全，或者可以做成 checkbox)
-    // alert("Batch completed!"); 
+      // 2. 如果有 Cache，強制刪除
+      if (currentRunningCacheRef.current) {
+          console.log("User stopped. Deleting cache:", currentRunningCacheRef.current);
+          try {
+              await onDeleteCache();
+              setCreationStatus('Stopped. Cache deleted.');
+          } catch (e) {
+              console.error("Error deleting cache on stop", e);
+          }
+          currentRunningCacheRef.current = undefined;
+      }
   };
 
-  const handleDownloadJSON = () => {
-    const dataStr = JSON.stringify(results, null, 2);
-    const blob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `bulk_qa_results_${Date.now()}.json`;
-    a.click();
+  const handleFolderSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (!e.target.files || e.target.files.length === 0) return;
+      
+      const files = Array.from(e.target.files).filter(f => f.type.startsWith('text/') || f.name.endsWith('.txt') || f.name.endsWith('.md') || f.name.endsWith('.json') || f.name.endsWith('.js') || f.name.endsWith('.ts'));
+      
+      if (files.length === 0) return alert("No text files found in the selected folder.");
+
+      const newSessionId = Date.now().toString();
+      const folderName = files[0].webkitRelativePath.split('/')[0] || "Upload-" + newSessionId;
+
+      const newItems: BatchFileItem[] = [];
+      
+      // Read all files (Show loading state if many files?)
+      for (let i = 0; i < files.length; i++) {
+          const content = await readFileContent(files[i]);
+          newItems.push({
+              id: `${newSessionId}-${i}`,
+              originalFileName: files[i].name,
+              question: content,
+              answer: "",
+              status: 'pending'
+          });
+      }
+
+      const newSession: BatchSession = {
+          id: newSessionId,
+          name: folderName,
+          createdAt: Date.now(),
+          totalFiles: newItems.length,
+          completedFiles: 0,
+          items: newItems,
+          isFinished: false,
+          cacheNameUsed: undefined
+      };
+
+      saveLocalBatchSession(newSession);
+      setSessions(prev => [newSession, ...prev]);
+      setActiveSessionId(newSessionId);
+      
+      // Clear input
+      if (folderInputRef.current) folderInputRef.current.value = '';
   };
 
-  const handleDownloadCSV = () => {
-    // 簡單的 CSV 轉義
-    const escapeCsv = (str: string) => `"${str.replace(/"/g, '""')}"`;
-    const header = "ID,Question,Answer,Status\n";
-    const rows = results.map(r => `${r.id},${escapeCsv(r.question)},${escapeCsv(r.answer)},${r.status}`).join("\n");
-    
-    const blob = new Blob([header + rows], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `bulk_qa_results_${Date.now()}.csv`;
-    a.click();
+  const handleIntegratedRun = async () => {
+      if (!activeSession) return;
+      if (!apiKey) return alert("Please enter API Key.");
+
+      // 初始化中斷控制器
+      abortControllerRef.current = new AbortController();
+      const signal = abortControllerRef.current.signal;
+
+      let activeCacheName = contextCache.status === 'active' ? contextCache.cacheName : undefined;
+
+      setIsRunning(true);
+      setCreationStatus('Initializing...');
+
+      try {
+          // 1. Handle Cache Creation (Only if file provided)
+          if (contextFile) {
+              // If there is an existing cache (even if from previous run), delete it first to avoid "State Residue"
+              if (contextCache.status === 'active' || contextCache.cacheName) {
+                  setCreationStatus('Cleaning up old cache...');
+                  try {
+                      await onDeleteCache();
+                  } catch (e) {
+                      console.warn("Failed to delete old cache, proceeding...", e);
+                  }
+              }
+
+              setCreationStatus('Uploading & Caching file...');
+              const result = await onCreateCache(contextFile, ttlMinutes * 60);
+              if (!result) {
+                  throw new Error("Failed to create cache");
+              }
+              activeCacheName = result.name;
+              currentRunningCacheRef.current = activeCacheName;
+              setCreationStatus('Cache Ready. Starting Batch...');
+          } else {
+              // No new file, check if we have an existing active cache
+              if (!activeCacheName) {
+                  const proceed = confirm("No active context cache found. Run without context?");
+                  if (!proceed) {
+                      setIsRunning(false);
+                      setCreationStatus('');
+                      return;
+                  }
+              } else {
+                  currentRunningCacheRef.current = activeCacheName;
+                  console.log("Using existing cache:", activeCacheName);
+              }
+          }
+      } catch (e: any) {
+          console.error(e);
+          setIsRunning(false);
+          setCreationStatus('Error during initialization: ' + e.message);
+          return;
+      }
+      
+      if (signal.aborted) return;
+
+      // Step 2: Start Batch
+      const CONCURRENCY = 5;
+      const pendingItems = activeSession.items.filter(i => i.status === 'pending' || i.status === 'error');
+      
+      let currentSessionState = { ...activeSession, cacheNameUsed: activeCacheName }; 
+      let startedFilesCount = activeSession.totalFiles - pendingItems.length; 
+      let cacheDeleted = false;
+
+      // Helper to process one item
+      const processItem = async (item: BatchFileItem) => {
+           if (signal.aborted) return;
+
+           // Update status to loading
+           currentSessionState = updateItemInSession(currentSessionState, item.id, { status: 'loading' });
+           setSessions(prev => prev.map(s => s.id === currentSessionState.id ? currentSessionState : s));
+
+           try {
+               // --- 關鍵修改：強制 Prompt 關聯 Cache ---
+               let finalPrompt = item.question;
+               
+               if (activeCacheName) {
+                   // 這是讓模型知道必須看 Cache 的關鍵
+                   finalPrompt = `[System Instruction: You have access to a cached document. Please answer the user's question strictly based on that document.]\n\nUser Question:\n${item.question}`;
+               }
+
+               const response = await generateBatchContent(
+                   apiKey,
+                   config,
+                   finalPrompt,
+                   activeCacheName,
+                   () => {
+                       // onFirstToken callback
+                       startedFilesCount++;
+                       // 當最後一個檔案開始跑時，自動刪除 (Cost Saver)
+                       if (autoDeleteCache && activeCacheName && startedFilesCount === currentSessionState.totalFiles && !cacheDeleted && !signal.aborted) {
+                           console.log("All requests active. Deleting cache early.");
+                           cacheDeleted = true;
+                           currentRunningCacheRef.current = undefined;
+                           onDeleteCache(); 
+                       }
+                   }
+               );
+
+               // Cost
+               if (response.usageMetadata) {
+                   onUpdateCost(response.usageMetadata.promptTokenCount, response.usageMetadata.candidatesTokenCount);
+               }
+
+               currentSessionState = updateItemInSession(currentSessionState, item.id, { 
+                   status: 'success', 
+                   answer: response.text,
+                   tokenUsage: {
+                       prompt: response.usageMetadata?.promptTokenCount || 0,
+                       candidates: response.usageMetadata?.candidatesTokenCount || 0
+                   }
+               });
+
+           } catch (err: any) {
+               if (signal.aborted) return; // 忽略被中斷的錯誤
+               console.error(err);
+               currentSessionState = updateItemInSession(currentSessionState, item.id, { 
+                   status: 'error', 
+                   errorMsg: err.message 
+               });
+           }
+           
+           if (!signal.aborted) {
+               setSessions(prev => prev.map(s => s.id === currentSessionState.id ? currentSessionState : s));
+               saveLocalBatchSession(currentSessionState);
+           }
+      };
+
+      // Chunked execution
+      for (let i = 0; i < pendingItems.length; i += CONCURRENCY) {
+          if (signal.aborted) break;
+          if (activeSessionId !== currentSessionState.id) break; // User switched session
+          const chunk = pendingItems.slice(i, i + CONCURRENCY);
+          await Promise.all(chunk.map(item => processItem(item)));
+      }
+
+      // 如果是正常跑完 (非中斷)，且還沒刪 Cache，則執行刪除
+      if (!signal.aborted) {
+          setIsRunning(false);
+          setCreationStatus('');
+          
+          if (autoDeleteCache && activeCacheName && !cacheDeleted) {
+               onDeleteCache();
+               cacheDeleted = true;
+               currentRunningCacheRef.current = undefined;
+          }
+          
+          if (cacheDeleted) {
+              alert("Batch complete! Cache was auto-deleted.");
+          } else {
+              alert("Batch complete!");
+          }
+      }
   };
+
+  const handleDownloadZip = async (session: BatchSession) => {
+      const blob = await createZipFromSession(session);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${sanitizeFileName(session.name)}_results.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+  };
+
+  const handleDeleteSession = (id: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (confirm("Are you sure you want to delete this history?")) {
+          setSessions(deleteLocalBatchSession(id));
+          if (activeSessionId === id) setActiveSessionId(null);
+      }
+  };
+
+  const handleClearAllHistory = () => {
+      if (confirm("Delete ALL batch history? This cannot be undone.")) {
+          clearAllLocalBatchSessions();
+          setSessions([]);
+          setActiveSessionId(null);
+      }
+  };
+
+  const handleRestoreFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      // Allow importing a folder of previously downloaded results to view them
+      if (!e.target.files || e.target.files.length === 0) return;
+      const files = Array.from(e.target.files);
+      
+      const newSessionId = Date.now().toString();
+      const folderName = "Restored-" + (files[0].webkitRelativePath.split('/')[0] || "Folder");
+
+      const newItems: BatchFileItem[] = [];
+
+      for (let i = 0; i < files.length; i++) {
+          const content = await readFileContent(files[i]);
+          // Simple heuristic to split Q and A if formatted by our tool
+          const parts = content.split('=== ANSWER ===');
+          const question = parts[0].replace('=== QUESTION ===', '').trim();
+          const answer = parts[1] ? parts[1].trim() : "";
+          
+          newItems.push({
+              id: `${newSessionId}-${i}`,
+              originalFileName: files[i].name,
+              question: question,
+              answer: answer,
+              status: answer ? 'success' : 'pending' // Assume success if answer exists
+          });
+      }
+
+      const newSession: BatchSession = {
+          id: newSessionId,
+          name: folderName,
+          createdAt: Date.now(),
+          totalFiles: newItems.length,
+          completedFiles: newItems.filter(i => i.status === 'success').length,
+          items: newItems,
+          isFinished: true
+      };
+
+      saveLocalBatchSession(newSession);
+      setSessions(prev => [newSession, ...prev]);
+      setActiveSessionId(newSessionId);
+      
+      if (restoreInputRef.current) restoreInputRef.current.value = '';
+  };
+
+  const pendingItems = activeSession?.items.filter(i => i.status === 'pending' || i.status === 'loading') || [];
+  const completedItems = activeSession?.items.filter(i => i.status === 'success' || i.status === 'error') || [];
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-[#131314] overflow-hidden p-6 gap-6">
-      
-      {/* Header */}
-      <div className="flex justify-between items-start">
-          <div>
-            <h1 className="text-xl font-bold text-white mb-2">Bulk Q&A Runner (Cost Saver)</h1>
-            <p className="text-sm text-gray-400">
-                1. Upload file in Right Panel & Create Cache (TTL 5 min).<br/>
-                2. Enter questions below.<br/>
-                3. Run concurrent requests against cache.<br/>
-                4. Delete cache immediately to save money.
-            </p>
-          </div>
-          
-          {/* Status Badge */}
-          <div className={`px-4 py-2 rounded border ${contextCache.status === 'active' ? 'bg-green-900/20 border-green-800 text-green-400' : 'bg-red-900/20 border-red-800 text-red-400'}`}>
-              <div className="flex items-center gap-2 font-bold text-sm">
-                  {contextCache.status === 'active' ? <CheckCircle size={16}/> : <AlertCircle size={16}/>}
-                  {contextCache.status === 'active' ? 'CACHE ACTIVE' : 'NO ACTIVE CACHE'}
-              </div>
-              {contextCache.status === 'active' && (
-                  <div className="text-xs mt-1 text-right">
-                      <button onClick={onDeleteCache} className="underline hover:text-white">Delete Now</button>
-                  </div>
-              )}
-          </div>
-      </div>
+    <div className="flex h-full w-full bg-[#131314] text-[#e3e3e3] overflow-hidden">
+        
+        {/* Left Sidebar: Session List */}
+        <div className="w-64 border-r border-studio-border bg-studio-bg flex flex-col flex-shrink-0">
+            <div className="p-4 border-b border-studio-border">
+                <h2 className="text-sm font-bold flex items-center gap-2 mb-3">
+                    <History size={16} /> Batch History
+                </h2>
+                <div className="flex gap-2">
+                    <button 
+                        onClick={() => folderInputRef.current?.click()}
+                        className="flex-1 bg-studio-primary text-studio-bg text-xs font-bold py-2 rounded flex items-center justify-center gap-1 hover:opacity-90"
+                    >
+                        <FolderInput size={14} /> Import Questions
+                    </button>
+                    <input 
+                        type="file" 
+                        ref={folderInputRef} 
+                        // @ts-ignore - webkitdirectory is standard in modern browsers
+                        webkitdirectory="" 
+                        multiple 
+                        className="hidden" 
+                        onChange={handleFolderSelect} 
+                    />
+                    
+                    <button 
+                         onClick={() => restoreInputRef.current?.click()}
+                         className="px-2 bg-studio-panel border border-studio-border text-gray-400 rounded hover:text-white"
+                         title="Restore from Results Folder"
+                    >
+                        <Archive size={14} />
+                    </button>
+                    <input 
+                        type="file" 
+                        ref={restoreInputRef} 
+                        // @ts-ignore
+                        webkitdirectory="" 
+                        multiple 
+                        className="hidden" 
+                        onChange={handleRestoreFiles} 
+                    />
+                </div>
+            </div>
 
-      <div className="flex flex-1 gap-6 overflow-hidden">
-          {/* Left: Input Area */}
-          <div className="w-1/3 flex flex-col gap-4">
-              <textarea
-                className="flex-1 bg-studio-panel border border-studio-border rounded-lg p-4 text-sm font-mono text-gray-300 focus:border-studio-primary outline-none resize-none"
-                placeholder="Paste your questions here (one per line)...&#10;Question 1?&#10;Question 2?&#10;..."
-                value={inputQuestions}
-                onChange={(e) => setInputQuestions(e.target.value)}
-                disabled={isRunning}
-              />
-              <button
-                onClick={handleRun}
-                disabled={isRunning || !inputQuestions.trim()}
-                className="w-full py-3 bg-studio-primary text-studio-bg font-bold rounded-lg hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2 transition-all"
-              >
-                {isRunning ? <Loader2 className="animate-spin"/> : <Play size={18} />}
-                {isRunning ? `Running (${progress}%)` : 'Run Concurrent Requests'}
-              </button>
-          </div>
+            <div className="flex-1 overflow-y-auto">
+                {sessions.map(s => (
+                    <div 
+                        key={s.id}
+                        onClick={() => setActiveSessionId(s.id)}
+                        className={`p-3 border-b border-studio-border cursor-pointer hover:bg-studio-panel group relative ${activeSessionId === s.id ? 'bg-[#004a77]/30 border-l-2 border-l-studio-primary' : ''}`}
+                    >
+                        <div className="text-sm font-medium truncate pr-6">{s.name}</div>
+                        <div className="text-[10px] text-gray-500 mt-1 flex justify-between">
+                             <span>{new Date(s.createdAt).toLocaleDateString()}</span>
+                             <span>{s.completedFiles}/{s.totalFiles}</span>
+                        </div>
+                        {s.isFinished && <CheckCircle size={12} className="text-green-500 absolute top-3 right-2" />}
+                        
+                        <button 
+                            onClick={(e) => handleDeleteSession(s.id, e)}
+                            className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400"
+                        >
+                            <Trash2 size={12} />
+                        </button>
+                    </div>
+                ))}
+                {sessions.length === 0 && (
+                    <div className="p-4 text-center text-xs text-gray-500 italic">No history</div>
+                )}
+            </div>
+            
+            {sessions.length > 0 && (
+                <div className="p-2 border-t border-studio-border">
+                    <button 
+                        onClick={handleClearAllHistory}
+                        className="w-full text-[10px] text-red-400 hover:bg-red-900/20 py-1 rounded"
+                    >
+                        Clear All History
+                    </button>
+                </div>
+            )}
+        </div>
 
-          {/* Right: Results Area */}
-          <div className="flex-1 flex flex-col bg-studio-panel border border-studio-border rounded-lg overflow-hidden">
-              <div className="p-3 border-b border-studio-border flex justify-between items-center bg-[#1e1e1e]">
-                  <span className="text-sm font-medium">Results ({results.filter(r => r.status === 'success').length}/{results.length})</span>
-                  <div className="flex gap-2">
-                      <button 
-                        onClick={handleDownloadCSV} 
-                        disabled={results.length === 0}
-                        className="p-1.5 hover:bg-[#333] rounded text-gray-400 hover:text-white flex items-center gap-1 text-xs"
-                      >
-                          <FileSpreadsheet size={14} /> CSV
-                      </button>
-                      <button 
-                        onClick={handleDownloadJSON} 
-                        disabled={results.length === 0}
-                        className="p-1.5 hover:bg-[#333] rounded text-gray-400 hover:text-white flex items-center gap-1 text-xs"
-                      >
-                          <FileJson size={14} /> JSON
-                      </button>
-                  </div>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                  {results.length === 0 && (
-                      <div className="h-full flex items-center justify-center text-gray-600 italic">
-                          Results will appear here...
-                      </div>
-                  )}
-                  {results.map((res) => (
-                      <div key={res.id} className="bg-[#131314] rounded border border-studio-border p-3">
-                          <div className="flex items-start gap-3 mb-2">
-                              <span className="text-xs font-mono text-gray-500 mt-1">Q{parseInt(res.id)+1}</span>
-                              <div className="font-medium text-gray-200">{res.question}</div>
-                              <div className="ml-auto">
-                                  {res.status === 'loading' && <Loader2 size={14} className="animate-spin text-blue-400"/>}
-                                  {res.status === 'success' && <CheckCircle size={14} className="text-green-400"/>}
-                                  {res.status === 'error' && <AlertCircle size={14} className="text-red-400"/>}
-                                  {res.status === 'pending' && <span className="w-2 h-2 rounded-full bg-gray-600 block mt-1"></span>}
-                              </div>
-                          </div>
-                          {res.answer && (
-                              <div className="pl-8 text-sm text-gray-400 whitespace-pre-wrap border-l-2 border-studio-border ml-1">
-                                  {res.answer}
-                              </div>
-                          )}
-                      </div>
-                  ))}
-              </div>
-          </div>
-      </div>
+        {/* Main Content: Active Session */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-studio-panel">
+            {activeSession ? (
+                <>
+                        {/* Header - Stop Button 移到這裡 */}
+                    <div className="p-6 border-b border-studio-border bg-studio-bg">
+                        <div className="flex justify-between items-start mb-4">
+                            <div>
+                                <h1 className="text-xl font-bold flex items-center gap-2">
+                                    {activeSession.name}
+                                    <span className={`text-xs px-2 py-0.5 rounded border ${activeSession.isFinished ? 'bg-green-900/20 border-green-800 text-green-400' : 'bg-blue-900/20 border-blue-800 text-blue-400'}`}>
+                                        {activeSession.isFinished ? 'Completed' : 'Ready'}
+                                    </span>
+                                </h1>
+                                <p className="text-xs text-gray-500 mt-1">Session ID: {activeSession.id}</p>
+                            </div>
+
+                            {/* --- 停止按鈕 (總是可見，如果是 Running 狀態) --- */}
+                            {isRunning && (
+                                <button
+                                    onClick={handleStop}
+                                    className="px-4 py-2 bg-red-600 text-white font-bold rounded-lg shadow-lg flex items-center gap-2 hover:bg-red-700 transition-all animate-pulse border-2 border-red-400"
+                                >
+                                    <Square size={16} fill="currentColor" />
+                                    EMERGENCY STOP
+                                </button>
+                            )}
+                        </div>
+
+                        {/* --- Integrated Context & Run --- */}
+                        {!activeSession.isFinished && !isRunning && (
+                            <div className="mb-4 bg-[#1e1e1e] border border-studio-border rounded-lg p-4 animate-in fade-in">
+                                <h3 className="text-sm font-bold text-gray-300 mb-2 flex items-center gap-2">
+                                    <Database size={16} className="text-studio-primary"/>
+                                    Context Configuration
+                                </h3>
+                                
+                                <div className="flex gap-4 items-end">
+                                    <div className="flex-1">
+                                        <label className="text-xs text-gray-500 mb-1 block">
+                                            1. Attach Context File (PDF/TXT)
+                                        </label>
+                                        <div className="flex gap-2">
+                                            <button 
+                                                onClick={() => contextInputRef.current?.click()}
+                                                disabled={isRunning}
+                                                className={`flex-1 py-2 px-3 rounded border text-sm flex items-center gap-2 truncate ${contextFile ? 'bg-studio-primary/10 border-studio-primary text-studio-primary' : 'bg-[#131314] border-studio-border text-gray-400'} disabled:opacity-50`}
+                                            >
+                                                <FileUp size={16} />
+                                                <span className="truncate">
+                                                    {contextFile ? contextFile.name : (contextCache.status === 'active' ? `Using Active: ${contextCache.fileName}` : "Select Reference File...")}
+                                                </span>
+                                            </button>
+                                            <input type="file" ref={contextInputRef} className="hidden" onChange={handleContextFileSelect} />
+                                            {contextFile && !isRunning && (
+                                                <button onClick={() => setContextFile(null)} className="p-2 text-gray-500 hover:text-red-400">
+                                                    <Trash2 size={16}/>
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="flex-1">
+                                         <label className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                                            2. Verify System Instruction
+                                            <div className="group relative">
+                                                <AlertCircle size={12} className="text-gray-500 cursor-help"/>
+                                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-black border border-gray-700 rounded text-xs text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                                                    This instruction is prepended to every request in the batch.
+                                                </div>
+                                            </div>
+                                        </label>
+                                        <div className="text-xs bg-[#131314] border border-studio-border rounded p-2 text-gray-400 truncate" title={systemInstruction}>
+                                            {systemInstruction ? `"${systemInstruction.slice(0, 50)}..."` : "(Empty - Model will just answer questions)"}
+                                        </div>
+                                    </div>
+
+                                    {/* 按鈕區域：根據是否正在執行顯示不同按鈕 */}
+                                    {isRunning ? (
+                                        <button
+                                            onClick={handleStop}
+                                            className="h-10 px-6 bg-red-900/80 border border-red-700 text-white font-bold rounded flex items-center gap-2 hover:bg-red-800 transition-colors animate-pulse"
+                                        >
+                                            <Square size={16} fill="currentColor" />
+                                            STOP & DELETE CACHE
+                                        </button>
+                                    ) : (
+                                        <button
+                                            onClick={handleIntegratedRun}
+                                            className="h-10 px-6 bg-studio-primary text-studio-bg font-bold rounded flex items-center gap-2 hover:opacity-90 disabled:opacity-50"
+                                        >
+                                            <Zap size={16} fill="currentColor" />
+                                            Start Integrated Run
+                                        </button>
+                                    )}
+                                </div>
+                                
+                                {creationStatus && (
+                                    <div className="mt-2 text-xs text-yellow-400 flex items-center gap-2">
+                                        <Loader2 size={12} className={isRunning ? "animate-spin" : ""}/> {creationStatus}
+                                    </div>
+                                )}
+                                
+                                <div className="mt-2 flex items-center gap-4">
+                                    <div className="flex items-center gap-2">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={autoDeleteCache} 
+                                            onChange={(e) => setAutoDeleteCache(e.target.checked)}
+                                            className="accent-studio-primary"
+                                            disabled={isRunning}
+                                        />
+                                        <span className="text-xs text-gray-500">Auto-delete cache immediately after all requests start (Saves money)</span>
+                                    </div>
+
+                                    <div className="flex items-center gap-2 border-l border-gray-700 pl-4">
+                                        <span className="text-xs text-gray-500">TTL (Mins):</span>
+                                        <input 
+                                            type="number" 
+                                            min="1"
+                                            max="60"
+                                            value={ttlMinutes}
+                                            onChange={(e) => setTtlMinutes(parseInt(e.target.value) || 5)}
+                                            className="w-16 bg-[#131314] border border-studio-border rounded px-2 py-1 text-xs text-gray-300 focus:border-studio-primary outline-none"
+                                            disabled={isRunning}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Progress Bar */}
+                        <div className="h-2 w-full bg-[#131314] rounded-full overflow-hidden mb-2">
+                            <div 
+                                className="h-full bg-studio-primary transition-all duration-300"
+                                style={{ width: `${(activeSession.completedFiles / activeSession.totalFiles) * 100}%` }}
+                            />
+                        </div>
+                        <div className="flex justify-between text-xs text-gray-400">
+                             <span>Progress: {activeSession.completedFiles} / {activeSession.totalFiles}</span>
+                        </div>
+                    </div>
+
+                    {/* Content Area - Split View (Pending vs Completed) */}
+                    <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+                        
+                        {/* Pending List (Hidden if empty) */}
+                        {pendingItems.length > 0 && (
+                             <div className={`flex-1 overflow-y-auto p-4 border-r border-studio-border min-w-[300px] ${completedItems.length > 0 ? 'hidden md:block' : 'w-full'}`}>
+                                <h3 className="text-xs font-bold text-gray-500 mb-3 sticky top-0 bg-studio-panel py-2 z-10 flex justify-between">
+                                    <span>PENDING / RUNNING ({pendingItems.length})</span>
+                                </h3>
+                                <div className="space-y-2">
+                                    {pendingItems.map((item) => (
+                                        <div key={item.id} className="bg-[#131314] border border-studio-border rounded p-3 opacity-80">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                {item.status === 'loading' ? <Loader2 size={14} className="animate-spin text-blue-400"/> : <div className="w-2 h-2 rounded-full bg-gray-600"/>}
+                                                <span className="text-xs font-mono truncate">{item.originalFileName}</span>
+                                            </div>
+                                            <div className="text-xs text-gray-500 truncate">{item.question.slice(0, 50)}...</div>
+                                        </div>
+                                    ))}
+                                </div>
+                             </div>
+                        )}
+
+                        {/* Completed List (Results) */}
+                        <div className="flex-[2] overflow-y-auto p-4 bg-[#0e0e0e]">
+                            <h3 className="text-xs font-bold text-gray-500 mb-3 sticky top-0 bg-[#0e0e0e] py-2 z-10 flex justify-between items-center">
+                                <span>COMPLETED ({completedItems.length})</span>
+                                {completedItems.length > 0 && (
+                                    <button
+                                        onClick={() => handleDownloadZip(activeSession)}
+                                        className="text-xs flex items-center gap-1 text-studio-primary hover:underline"
+                                    >
+                                        <Download size={12} /> Download ZIP
+                                    </button>
+                                )}
+                            </h3>
+                            <div className="space-y-4">
+                                {completedItems.length === 0 && (
+                                    <div className="text-center text-gray-600 italic py-10">Results will appear here as they finish...</div>
+                                )}
+                                {completedItems.map((item) => (
+                                    <div key={item.id} className="bg-[#131314] border border-studio-border rounded-lg overflow-hidden">
+                                        <div 
+                                            className="p-3 flex items-center gap-3 cursor-pointer hover:bg-[#1e1e1e]"
+                                            onClick={() => setExpandedItemId(expandedItemId === item.id ? null : item.id)}
+                                        >
+                                            {expandedItemId === item.id ? <ChevronDown size={16} className="text-gray-500"/> : <ChevronRight size={16} className="text-gray-500"/>}
+                                            <div className="text-sm font-medium text-green-400 flex-1 truncate">{item.originalFileName}</div>
+                                            {item.status === 'error' && <AlertCircle size={16} className="text-red-400"/>}
+                                            {item.tokenUsage && (
+                                                <span className="text-[10px] font-mono text-gray-600">
+                                                    {item.tokenUsage.prompt + item.tokenUsage.candidates} toks
+                                                </span>
+                                            )}
+                                        </div>
+                                        
+                                        {/* Auto expand recent or click to expand */}
+                                        {expandedItemId === item.id && (
+                                            <div className="border-t border-studio-border p-4 bg-[#1a1a1a]">
+                                                 <div className="mb-2">
+                                                    <span className="text-[10px] text-gray-500 uppercase">Question</span>
+                                                    <div className="text-xs text-gray-400 mb-2 line-clamp-2 hover:line-clamp-none">{item.question}</div>
+                                                 </div>
+                                                 <div>
+                                                    <span className="text-[10px] text-gray-500 uppercase">Answer</span>
+                                                    <div className="text-sm text-gray-200 whitespace-pre-wrap font-mono mt-1">
+                                                        {item.answer || <span className="text-red-400">{item.errorMsg}</span>}
+                                                    </div>
+                                                 </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </>
+            ) : (
+                <div className="flex-1 flex flex-col items-center justify-center text-gray-500">
+                    <Database size={48} className="mb-4 opacity-20" />
+                    <p className="text-lg font-medium text-gray-400">Select "Import Questions" to start</p>
+                    <p className="text-sm mt-2 max-w-md text-center">
+                        Select a folder of text files to process them concurrently.
+                        <br/>
+                        You can attach a context file in the next step.
+                    </p>
+                    <button 
+                        onClick={() => folderInputRef.current?.click()}
+                        className="mt-6 px-6 py-3 bg-studio-primary text-studio-bg font-bold rounded-full hover:opacity-90"
+                    >
+                        Import Questions
+                    </button>
+                </div>
+            )}
+        </div>
     </div>
   );
 };
