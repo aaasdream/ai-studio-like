@@ -366,3 +366,37 @@ export const listActiveCaches = async (apiKey: string): Promise<{ name: string, 
     
     return caches;
 };
+
+// 新增：直接使用 Content 陣列建立 Cache (適用於省錢模式)
+export const createCacheFromContent = async (
+    apiKey: string,
+    model: string,
+    contents: Content[],
+    ttlSeconds: number,
+    systemInstruction?: string
+): Promise<{ name: string; sizeBytes: number }> => {
+    const ai = new GoogleGenAI({ apiKey });
+
+    const cacheConfig: any = {
+        contents: contents,
+        ttl: `${ttlSeconds}s`
+    };
+
+    if (systemInstruction) {
+        cacheConfig.systemInstruction = {
+            parts: [{ text: systemInstruction }]
+        };
+    }
+
+    // 呼叫 API 建立 Cache
+    const cache = await ai.caches.create({
+        model: model,
+        config: cacheConfig
+    });
+
+    return {
+        name: cache.name,
+        // @ts-ignore
+        sizeBytes: cache.sizeBytes || 0
+    };
+};

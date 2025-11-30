@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
-import { Plus, MessageSquare, Save, Trash2, Download, Upload, Layers, RefreshCw, CheckCircle, Clock, AlertCircle } from 'lucide-react';
-import { SessionData, BatchJobRecord } from '../types';
+import { Plus, MessageSquare, Save, Trash2, Download, Upload, Layers, RefreshCw, CheckCircle, Clock, AlertCircle, PiggyBank } from 'lucide-react'; // Added PiggyBank
+import { SessionData, BatchJobRecord, ActiveViewType } from '../types'; // Updated import
 import { APP_VERSION } from '../constants';
 
 interface SidebarProps {
@@ -14,8 +14,8 @@ interface SidebarProps {
   batchJobs: BatchJobRecord[];
   onCheckBatchStatus: (job: BatchJobRecord) => void;
   onDeleteBatchJob: (id: string, e: React.MouseEvent) => void;
-  activeView: 'chat' | 'bulk';
-  onViewChange: (view: 'chat' | 'bulk') => void;
+  activeView: ActiveViewType;
+  onViewChange: (view: ActiveViewType) => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ 
@@ -48,30 +48,45 @@ const Sidebar: React.FC<SidebarProps> = ({
       return 'text-yellow-400';
   };
 
+  // Helper to determine if we should show chat-like features (Sessions list)
+  const isChatLikeInterface = activeView === 'chat' || activeView === 'economy';
+
   return (
     <div className="w-64 flex-shrink-0 bg-studio-bg border-r border-studio-border h-full flex flex-col">
       <div className="p-4 space-y-3">
-        {/* View Switcher (Chat vs Bulk) */}
+        {/* View Switcher */}
         <div className="flex bg-studio-panel p-1 rounded-lg border border-studio-border mb-2">
             <button 
                 onClick={() => onViewChange('chat')}
-                className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-2 transition-all ${
+                className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-1 transition-all ${
                     activeView === 'chat' ? 'bg-[#333] text-white shadow' : 'text-gray-500 hover:text-gray-300'
                 }`}
+                title="Standard Chat"
             >
-                <MessageSquare size={14} /> Chat
+                <MessageSquare size={14} />
             </button>
             <button 
                  onClick={() => onViewChange('bulk')}
-                 className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-2 transition-all ${
+                 className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-1 transition-all ${
                     activeView === 'bulk' ? 'bg-purple-900/30 text-purple-200 border border-purple-800' : 'text-gray-500 hover:text-gray-300'
                 }`}
+                title="Bulk Processing"
             >
-                <Layers size={14} /> Bulk
+                <Layers size={14} />
+            </button>
+            <button 
+                 onClick={() => onViewChange('economy')}
+                 className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-1 transition-all ${
+                    activeView === 'economy' ? 'bg-green-900/30 text-green-200 border border-green-800' : 'text-gray-500 hover:text-gray-300'
+                }`}
+                title="Economy Mode (Cache & Kill)"
+            >
+                <PiggyBank size={14} />
             </button>
         </div>
 
-        {activeView === 'chat' && (
+        {/* Create New Chat Button (Visible for Chat and Economy) */}
+        {isChatLikeInterface && (
              <button 
                 onClick={onNewChat}
                 className="w-full flex items-center justify-center gap-2 bg-studio-primary text-studio-bg font-medium py-3 rounded-full hover:opacity-90 transition-opacity"
@@ -81,8 +96,8 @@ const Sidebar: React.FC<SidebarProps> = ({
             </button>
         )}
 
-        {/* List Tabs */}
-        {activeView === 'chat' && (
+        {/* List Tabs (Visible for Chat and Economy) */}
+        {isChatLikeInterface ? (
             <div className="flex bg-studio-panel p-1 rounded-lg">
                 <button 
                     onClick={() => setActiveTab('chats')}
@@ -101,7 +116,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                     <Layers size={14} /> Async Jobs
                 </button>
             </div>
-        )}
+        ) : null}
       </div>
 
       <div className="flex-1 overflow-y-auto px-2">
@@ -111,9 +126,11 @@ const Sidebar: React.FC<SidebarProps> = ({
                 <p className="text-xs mt-2">Use the main panel to run concurrent requests against your cached context.</p>
             </div>
         ) : activeTab === 'chats' ? (
+            // --- Chat Sessions List (Shared by Chat & Economy) ---
             <>
-                <div className="mb-2 px-3 text-xs font-semibold text-studio-subtext uppercase tracking-wider">
-                Recents
+                <div className="mb-2 px-3 text-xs font-semibold text-studio-subtext uppercase tracking-wider flex justify-between items-center">
+                    <span>Recents</span>
+                    {activeView === 'economy' && <span className="text-[10px] text-green-400 border border-green-800 px-1 rounded">ECO MODE</span>}
                 </div>
                 <ul className="space-y-1">
                 {sessions.map((session) => (
@@ -143,6 +160,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 </ul>
             </>
         ) : (
+             // --- Batch List (Shared) ---
             <>
                 <div className="mb-2 px-3 text-xs font-semibold text-studio-subtext uppercase tracking-wider">
                 Async Batch History

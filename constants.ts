@@ -20,4 +20,4 @@ export const DEFAULT_CONFIG: ModelConfig = {
 
 export const INITIAL_SYSTEM_INSTRUCTION = '';
 
-export const APP_VERSION = 'v1.0.10';
+export const APP_VERSION = 'v1.2.1';

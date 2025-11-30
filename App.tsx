@@ -3,20 +3,52 @@ import Sidebar from './components/Sidebar';
 import MainChat from './components/MainChat';
 import RightPanel from './components/RightPanel';
 import BulkRunPanel from './components/BulkRunPanel';
-import { SessionData, ModelConfig, ChatMessage, Role, Attachment, ContextCacheConfig } from './types';
+import EconomyPanel from './components/EconomyPanel'; // Import new panel
+import { SessionData, ModelConfig, ChatMessage, Role, Attachment, ContextCacheConfig, ActiveViewType } from './types';
 import { DEFAULT_CONFIG, INITIAL_SYSTEM_INSTRUCTION, AVAILABLE_MODELS } from './constants';
 import { createChatSession, streamMessage, estimateTokens, createCache, formatHistory, deleteCache, getBatchJob } from './services/geminiService';
 import { saveCostRecord, getDailyCost, getMonthlyCost } from './services/costService';
 import { getBatchHistory, updateBatchJobStatus, deleteBatchJob, saveBatchJob } from './services/batchService';
 import { BatchJobRecord } from './types';
 
+// Storage Keys
+const STORAGE_KEY_SESSIONS = 'gemini_sessions_v2'; // v2 to avoid conflicts with old structure
+const STORAGE_KEY_CURRENT_SESSION = 'gemini_current_session_id';
+
 export default function App() {
-  // State
-  const [sessions, setSessions] = useState<SessionData[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string>('default');
-  const [systemInstruction, setSystemInstruction] = useState(INITIAL_SYSTEM_INSTRUCTION);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [config, setConfig] = useState<ModelConfig>(DEFAULT_CONFIG);
+  
+  // --- 1. Initialize State from LocalStorage ---
+  const [sessions, setSessions] = useState<SessionData[]>(() => {
+      try {
+          const stored = localStorage.getItem(STORAGE_KEY_SESSIONS);
+          if (stored) {
+              return JSON.parse(stored);
+          }
+      } catch (e) {
+          console.error("Failed to load sessions:", e);
+      }
+      // Default fallback if no storage
+      return [{
+          id: 'default',
+          title: 'Untitled Prompt',
+          systemInstruction: INITIAL_SYSTEM_INSTRUCTION,
+          messages: [],
+          config: DEFAULT_CONFIG,
+          updatedAt: Date.now()
+      }];
+  });
+
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() => {
+      return localStorage.getItem(STORAGE_KEY_CURRENT_SESSION) || 'default';
+  });
+
+  // Derived state (these update when currentSessionId changes)
+  // We need to initialize them based on the loaded session
+  const currentSession = sessions.find(s => s.id === currentSessionId) || sessions[0];
+
+  const [systemInstruction, setSystemInstruction] = useState(currentSession.systemInstruction);
+  const [messages, setMessages] = useState<ChatMessage[]>(currentSession.messages);
+  const [config, setConfig] = useState<ModelConfig>(currentSession.config);
   const [contextCache, setContextCache] = useState<ContextCacheConfig>({ 
     enabled: false, 
     ttlSeconds: 300, 
@@ -27,7 +59,9 @@ export default function App() {
   const [todayCost, setTodayCost] = useState(0);
   const [monthCost, setMonthCost] = useState(0);
   const [batchJobs, setBatchJobs] = useState<BatchJobRecord[]>([]);
-  const [activeView, setActiveView] = useState<'chat' | 'bulk'>('chat');
+  
+  // Set default active view to 'economy' as requested
+  const [activeView, setActiveView] = useState<ActiveViewType>('economy');
   
   // Ref for persistent ChatSession
   const chatSessionRef = React.useRef<any>(null);
@@ -42,24 +76,22 @@ export default function App() {
     return localStorage.getItem('gemini_api_key') || '';
   });
 
-  // Save API key to local storage
+  // Save API key
   useEffect(() => {
     localStorage.setItem('gemini_api_key', apiKey);
   }, [apiKey]);
 
-  // Initialize default session
+  // --- 2. Persist Sessions to LocalStorage ---
   useEffect(() => {
-    const defaultSession: SessionData = {
-      id: 'default',
-      title: 'Untitled Prompt',
-      systemInstruction: INITIAL_SYSTEM_INSTRUCTION,
-      messages: [],
-      config: DEFAULT_CONFIG,
-      updatedAt: Date.now()
-    };
-    setSessions([defaultSession]);
+      localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(sessions));
+  }, [sessions]);
 
-    // Initialize costs
+  useEffect(() => {
+      localStorage.setItem(STORAGE_KEY_CURRENT_SESSION, currentSessionId);
+  }, [currentSessionId]);
+
+  // Initialize costs & batch jobs (Once)
+  useEffect(() => {
     const now = new Date();
     const todayStr = now.toISOString().split('T')[0];
     setTodayCost(getDailyCost(todayStr));
@@ -67,7 +99,7 @@ export default function App() {
     setBatchJobs(getBatchHistory());
   }, []);
 
-  // Update session data when internal state changes
+  // Update session data when internal state (messages, config, etc.) changes
   useEffect(() => {
     setSessions(prev => prev.map(s => {
       if (s.id === currentSessionId) {
@@ -81,7 +113,7 @@ export default function App() {
       }
       return s;
     }));
-  }, [messages, config, systemInstruction, currentSessionId]);
+  }, [messages, config, systemInstruction, currentSessionId]); // Removed sessions to avoid cycle, used functional update
 
   const handleNewChat = () => {
     const newId = Date.now().toString();
@@ -95,6 +127,8 @@ export default function App() {
     };
     setSessions(prev => [newSession, ...prev]);
     setCurrentSessionId(newId);
+    
+    // Explicitly reset local state
     setMessages([]);
     setSystemInstruction(INITIAL_SYSTEM_INSTRUCTION);
     setConfig(DEFAULT_CONFIG);
@@ -113,10 +147,22 @@ export default function App() {
   const handleDeleteSession = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     const newSessions = sessions.filter(s => s.id !== id);
+    
     if (newSessions.length === 0) {
-       handleNewChat();
+       // If deleting the last one, reset to a new default
+       const defaultSession: SessionData = {
+          id: 'default',
+          title: 'Untitled Prompt',
+          systemInstruction: INITIAL_SYSTEM_INSTRUCTION,
+          messages: [],
+          config: DEFAULT_CONFIG,
+          updatedAt: Date.now()
+       };
+       setSessions([defaultSession]);
+       handleSelectSession('default');
     } else {
        setSessions(newSessions);
+       // If we deleted the active session, switch to the first available
        if (currentSessionId === id) {
          handleSelectSession(newSessions[0].id);
        }
@@ -167,7 +213,7 @@ export default function App() {
         };
 
         setSessions(prev => [newSession, ...prev]);
-        handleSelectSession(newId); // Switch to imported session
+        handleSelectSession(newId); 
 
       } catch (err) {
         alert("Failed to import session. Invalid JSON file.");
@@ -259,7 +305,17 @@ export default function App() {
     // Billable Input = Total Input - Cached Input
     const billableInput = Math.max(0, totalInput - cachedTokens);
     
-    const cost = (billableInput / 1000000 * modelData.costInput) + (outTokens / 1000000 * modelData.costOutput);
+    // Cost calculation (simplified for standard inputs)
+    // Note: Cached input cost is usually 25% of standard input. 
+    // We add specific logic for Economy Mode's cost tracking if needed, 
+    // but here we just use the generic formula.
+    // Ideally, costService should handle cached pricing tiers.
+    
+    // For now, we assume cached input is cheaper (0.25x roughly for Gemini)
+    const cost = (billableInput / 1000000 * modelData.costInput) + 
+                 (cachedTokens / 1000000 * (modelData.costInput * 0.25)) + 
+                 (outTokens / 1000000 * modelData.costOutput);
+                 
     setTotalCost(prev => prev + cost);
 
     // Save to LocalStorage
@@ -447,7 +503,31 @@ export default function App() {
         onViewChange={setActiveView}
       />
 
-      {activeView === 'chat' ? (
+      {activeView === 'economy' ? (
+        <EconomyPanel 
+            apiKey={apiKey}
+            config={config}
+            systemInstruction={systemInstruction}
+            onUpdateCost={(inTokens, outTokens) => {
+                 updateCost("", "", 0, outTokens, inTokens); 
+            }}
+            messages={messages}
+            setMessages={setMessages}
+            currentSessionId={currentSessionId}
+        />
+      ) : activeView === 'bulk' ? (
+        <BulkRunPanel 
+            apiKey={apiKey}
+            config={config}
+            contextCache={contextCache}
+            onCreateCache={handleCreateCache}
+            systemInstruction={systemInstruction}
+            onUpdateCost={(inTokens, outTokens) => {
+                 updateCost("", "", inTokens, outTokens);
+            }}
+            onDeleteCache={handleDeleteCache}
+        />
+      ) : (
         <MainChat 
           systemInstruction={systemInstruction}
           setSystemInstruction={setSystemInstruction}
@@ -456,33 +536,6 @@ export default function App() {
           isStreaming={isStreaming}
           onRegenerate={() => {}}
           onEditMessage={handleEditMessage}
-        />
-      ) : (
-        <BulkRunPanel 
-            apiKey={apiKey}
-            config={config}
-            contextCache={contextCache}
-            onCreateCache={handleCreateCache}
-            systemInstruction={systemInstruction}
-            onUpdateCost={(inTokens, outTokens) => {
-                 const modelData = AVAILABLE_MODELS.find(m => m.id === config.model) || AVAILABLE_MODELS[0];
-                 const cost = (inTokens / 1000000 * modelData.costInput) + (outTokens / 1000000 * modelData.costOutput);
-                 setTotalCost(prev => prev + cost);
-                 
-                 // Save record
-                 const now = new Date();
-                 saveCostRecord({
-                    date: now.toISOString().split('T')[0],
-                    model: config.model,
-                    inputTokens: inTokens,
-                    outputTokens: outTokens,
-                    cost: cost
-                });
-
-                 setTodayCost(prev => prev + cost);
-                 setMonthCost(prev => prev + cost);
-            }}
-            onDeleteCache={handleDeleteCache}
         />
       )}
 

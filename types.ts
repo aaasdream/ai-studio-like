@@ -7,6 +7,7 @@ export interface Attachment {
   name: string;
   mimeType: string;
   data: string; // Base64
+  textContent?: string; // For text-based files in Economy mode
 }
 
 export interface ChatMessage {
@@ -105,3 +106,5 @@ export interface BatchSession {
   cacheNameUsed?: string;
   isFinished: boolean;
 }
+
+export type ActiveViewType = 'chat' | 'bulk' | 'economy';
