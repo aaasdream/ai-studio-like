@@ -273,7 +273,7 @@ const EconomyPanel: React.FC<EconomyPanelProps> = ({
 
   return (
     <div 
-        className="flex-1 flex flex-col h-full relative bg-[#131314]"
+        className="flex-1 flex flex-col h-full relative bg-[#131314] min-w-0"
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}

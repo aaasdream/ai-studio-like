@@ -86,7 +86,7 @@ const MainChat: React.FC<MainChatProps> = ({
 
   return (
     <div 
-        className="flex-1 flex flex-col h-full relative"
+        className="flex-1 flex flex-col h-full relative min-w-0"
         onDrop={handleDrop}
         onDragOver={handleDragOver}
     >

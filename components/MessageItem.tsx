@@ -57,78 +57,6 @@ const MessageItem: React.FC<MessageItemProps> = ({ message, onEdit }) => {
       setShowMenu(false);
   };
 
-  // Improved Markdown Parser
-  const renderContent = (text: string) => {
-    // Split by code blocks first
-    const parts = text.split(/(```[\s\S]*?```)/g);
-    
-    return parts.map((part, index) => {
-      if (part.startsWith('```')) {
-        // --- Code Block ---
-        const content = part.slice(3, -3).replace(/^[a-z]+\n/, ''); // remove lang identifier line if exists
-        const langMatch = part.match(/^```([a-z]+)/);
-        const lang = langMatch ? langMatch[1] : 'Code';
-
-        return (
-          <div key={index} className="my-3 bg-[#1e1e1e] rounded-lg border border-studio-border overflow-hidden shadow-sm">
-            <div className="flex items-center justify-between px-3 py-1.5 bg-[#2d2d2d] border-b border-studio-border">
-              <span className="text-xs text-gray-400 font-mono font-bold uppercase">{lang}</span>
-              <button 
-                onClick={() => navigator.clipboard.writeText(content.trim())}
-                className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
-              >
-                <Copy size={12} /> Copy
-              </button>
-            </div>
-            <pre className="p-3 overflow-x-auto text-sm font-mono text-[#a5d6ff] leading-relaxed">
-              <code>{content}</code>
-            </pre>
-          </div>
-        );
-      } else {
-        // --- Regular Text with Markdown formatting ---
-        // Basic parser for Headers, Bold, Lists. 
-        // Note: For full markdown support, a library like react-markdown is usually better, 
-        // but this keeps it dependency-free as per request context.
-        
-        return (
-            <div key={index} className="whitespace-pre-wrap leading-relaxed space-y-2">
-                {part.split('\n').map((line, i) => {
-                    if (!line.trim()) return <br key={i}/>;
-
-                    // Headers
-                    if (line.startsWith('### ')) return <h3 key={i} className="text-lg font-bold mt-4 mb-2 text-blue-200">{processInlineStyles(line.slice(4))}</h3>;
-                    if (line.startsWith('## ')) return <h2 key={i} className="text-xl font-bold mt-6 mb-3 text-blue-300 border-b border-gray-700 pb-1">{processInlineStyles(line.slice(3))}</h2>;
-                    if (line.startsWith('# ')) return <h1 key={i} className="text-2xl font-bold mt-6 mb-4 text-white border-b border-gray-600 pb-2">{processInlineStyles(line.slice(2))}</h1>;
-                    
-                    // List Items
-                    if (line.trim().startsWith('- ')) {
-                        return (
-                            <div key={i} className="flex gap-2 ml-2">
-                                <span className="text-gray-400">•</span>
-                                <span>{processInlineStyles(line.trim().slice(2))}</span>
-                            </div>
-                        );
-                    }
-                    
-                    // Numbered Lists (Simple check)
-                    if (/^\d+\.\s/.test(line.trim())) {
-                         return (
-                            <div key={i} className="flex gap-2 ml-2">
-                                <span className="text-gray-400 font-mono">{line.trim().split('.')[0]}.</span>
-                                <span>{processInlineStyles(line.trim().replace(/^\d+\.\s/, ''))}</span>
-                            </div>
-                        );
-                    }
-
-                    return <div key={i}>{processInlineStyles(line)}</div>;
-                })}
-            </div>
-        );
-      }
-    });
-  };
-
   // Helper to handle bold (**text**) inside lines
   const processInlineStyles = (text: string) => {
       const parts = text.split(/(\*\*.*?\*\*)/g);
@@ -138,6 +66,160 @@ const MessageItem: React.FC<MessageItemProps> = ({ message, onEdit }) => {
           }
           return part;
       });
+  };
+
+  // --- NEW: Helper to detect and render Tables ---
+  const renderTable = (tableLines: string[], key: number) => {
+      if (tableLines.length < 2) return null;
+
+      // Parse Header
+      // Remove beginning/trailing pipes and split
+      const parseRow = (row: string) => {
+          return row.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      };
+
+      const headers = parseRow(tableLines[0]);
+      // Skip tableLines[1] which is the separator (e.g. |---|---|)
+      const bodyRows = tableLines.slice(2).map(parseRow);
+
+      return (
+          <div key={key} className="my-4 overflow-x-auto rounded-lg border border-studio-border">
+              <table className="w-full text-left text-sm border-collapse">
+                  <thead className="bg-[#2d2d2d] text-gray-200 font-semibold">
+                      <tr>
+                          {headers.map((h, i) => (
+                              <th key={i} className="px-4 py-2 border-b border-studio-border whitespace-nowrap">
+                                  {processInlineStyles(h)}
+                              </th>
+                          ))}
+                      </tr>
+                  </thead>
+                  <tbody className="bg-[#1e1e1e] text-gray-300">
+                      {bodyRows.map((row, rIdx) => (
+                          <tr key={rIdx} className="border-b border-studio-border/50 hover:bg-[#2a2b2e] transition-colors last:border-none">
+                              {row.map((cell, cIdx) => (
+                                  <td key={cIdx} className="px-4 py-2 border-r border-studio-border/30 last:border-none">
+                                      {processInlineStyles(cell)}
+                                  </td>
+                              ))}
+                          </tr>
+                      ))}
+                  </tbody>
+              </table>
+          </div>
+      );
+  };
+
+  // Improved Markdown Parser
+  const renderContent = (text: string) => {
+    // Split by code blocks first
+    const parts = text.split(/(```[\s\S]*?```)/g);
+    
+    return parts.map((part, partIndex) => {
+      if (part.startsWith('```')) {
+        // --- Code Block ---
+        const content = part.slice(3, -3).replace(/^[a-z]+\n/, ''); // remove lang identifier line if exists
+        const langMatch = part.match(/^```([a-z]+)/);
+        const lang = langMatch ? langMatch[1] : 'Code';
+
+        return (
+          <div key={partIndex} className="my-3 bg-[#1e1e1e] rounded-lg border border-studio-border overflow-hidden shadow-sm max-w-full">
+            <div className="flex items-center justify-between px-3 py-1.5 bg-[#2d2d2d] border-b border-studio-border">
+              <span className="text-xs text-gray-400 font-mono font-bold uppercase">{lang}</span>
+              <button 
+                onClick={() => navigator.clipboard.writeText(content.trim())}
+                className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+              >
+                <Copy size={12} /> Copy
+              </button>
+            </div>
+            <pre className="p-3 overflow-x-auto text-sm font-mono text-[#a5d6ff] leading-relaxed w-full">
+              <code>{content}</code>
+            </pre>
+          </div>
+        );
+      } else {
+        // --- Regular Text with Markdown (Headers, Lists, Tables) ---
+        
+        const lines = part.split('\n');
+        const elements: React.ReactNode[] = [];
+        
+        let i = 0;
+        while (i < lines.length) {
+            const line = lines[i];
+            const trimmed = line.trim();
+
+            // 1. Detect Table Start
+            // Must contain pipes, and next line must be separator (|---|)
+            if (trimmed.startsWith('|') && trimmed.endsWith('|') && i + 1 < lines.length) {
+                const nextLine = lines[i+1].trim();
+                // Simple regex to check for separator row: |---:|---|
+                if (/^\|[-:| ]+\|\s*$/.test(nextLine) || (nextLine.startsWith('|') && nextLine.includes('---'))) {
+                    // Collect all table lines
+                    const tableLines = [];
+                    while (i < lines.length && lines[i].trim().startsWith('|')) {
+                        tableLines.push(lines[i].trim());
+                        i++;
+                    }
+                    elements.push(renderTable(tableLines, i));
+                    continue; // Skip the rest of loop to process next item
+                }
+            }
+
+            // 2. Headers
+            if (line.startsWith('### ')) {
+                elements.push(<h3 key={i} className="text-lg font-bold mt-4 mb-2 text-blue-200">{processInlineStyles(line.slice(4))}</h3>);
+            } else if (line.startsWith('## ')) {
+                elements.push(<h2 key={i} className="text-xl font-bold mt-6 mb-3 text-blue-300 border-b border-gray-700 pb-1">{processInlineStyles(line.slice(3))}</h2>);
+            } else if (line.startsWith('# ')) {
+                elements.push(<h1 key={i} className="text-2xl font-bold mt-6 mb-4 text-white border-b border-gray-600 pb-2">{processInlineStyles(line.slice(2))}</h1>);
+            } 
+            // 3. List Items
+            else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+                elements.push(
+                    <div key={i} className="flex gap-2 ml-2 mb-1">
+                        <span className="text-gray-400 mt-1.5">•</span>
+                        <span className="leading-relaxed">{processInlineStyles(trimmed.slice(2))}</span>
+                    </div>
+                );
+            }
+            // 4. Numbered Lists
+            else if (/^\d+\.\s/.test(trimmed)) {
+                const number = trimmed.split('.')[0];
+                const content = trimmed.replace(/^\d+\.\s/, '');
+                elements.push(
+                    <div key={i} className="flex gap-2 ml-2 mb-1">
+                        <span className="text-gray-400 font-mono mt-0.5">{number}.</span>
+                        <span className="leading-relaxed">{processInlineStyles(content)}</span>
+                    </div>
+                );
+            }
+            // 5. Blockquote
+            else if (trimmed.startsWith('> ')) {
+                elements.push(
+                    <div key={i} className="border-l-4 border-gray-600 pl-4 py-1 my-2 text-gray-400 italic">
+                        {processInlineStyles(trimmed.slice(2))}
+                    </div>
+                );
+            }
+            // 6. Horizontal Rule
+            else if (trimmed === '---' || trimmed === '***') {
+                elements.push(<hr key={i} className="my-4 border-gray-700" />);
+            }
+            // 7. Regular Text (with line breaks if needed)
+            else {
+                if (!trimmed) {
+                    elements.push(<br key={i}/>);
+                } else {
+                    elements.push(<div key={i} className="min-h-[1.5em] leading-relaxed">{processInlineStyles(line)}</div>);
+                }
+            }
+            i++;
+        }
+
+        return <div key={partIndex} className="whitespace-pre-wrap">{elements}</div>;
+      }
+    });
   };
 
   return (
