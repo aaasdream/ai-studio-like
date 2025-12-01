@@ -18,6 +18,8 @@ const STORAGE_KEY_CURRENT_SESSION = 'gemini_current_session_id';
 export default function App() {
   
   // --- 1. Initialize State from LocalStorage ---
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const [sessions, setSessions] = useState<SessionData[]>(() => {
       try {
           const stored = localStorage.getItem(STORAGE_KEY_SESSIONS);
@@ -83,7 +85,13 @@ export default function App() {
 
   // --- 2. Persist Sessions to LocalStorage ---
   useEffect(() => {
-      localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(sessions));
+      try {
+          localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(sessions));
+          if (saveError) setSaveError(null);
+      } catch (e) {
+          console.error("Failed to save sessions (Quota Exceeded):", e);
+          setSaveError("⚠️ 儲存空間已滿！請刪除舊對話或匯出備份，否則重新整理後資料將遺失。");
+      }
   }, [sessions]);
 
   useEffect(() => {
@@ -486,8 +494,15 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen w-full bg-[#131314] text-[#e3e3e3] font-sans overflow-hidden">
+    <div className="flex h-screen w-full bg-[#131314] text-[#e3e3e3] font-sans overflow-hidden relative">
       
+      {saveError && (
+        <div className="absolute top-0 left-0 w-full bg-red-600/90 text-white text-xs font-bold p-2 z-[9999] text-center flex justify-between items-center px-4">
+            <span>{saveError}</span>
+            <button onClick={() => setSaveError(null)} className="hover:bg-red-800 rounded px-2">X</button>
+        </div>
+      )}
+
       <Sidebar 
         sessions={sessions}
         currentSessionId={currentSessionId}
